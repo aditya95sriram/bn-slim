@@ -1,0 +1,123 @@
+#!/bin/python3.6
+
+import subprocess
+import os
+import networkx as nx
+
+from utils import filled_in, TreeDecomposition, pairs
+
+import matplotlib.pyplot as plt
+from networkx.drawing.nx_agraph import pygraphviz_layout
+
+SOLVER_DIR = "../solvers"
+
+
+class BayesianNetwork(object):
+    def __init__(self, input_file=None, parents=None, score=None):
+        self.parents = dict() if parents is None else parents
+        self.score = score
+        self.input_file = input_file
+
+    def add(self, node, parents):
+        self.parents[node] = frozenset(parents)
+
+    def get_dag(self):  # todo[opt]: cache dag, don't recompute
+        dag = nx.DiGraph()
+        for node in self.parents.keys():
+            dag.add_node(node)
+            for parent in self.parents[node]:
+                dag.add_edge(parent, node)
+        return dag
+
+    def get_moralized(self):
+        dag = self.get_dag()
+        moral = dag.to_undirected()
+        for node in self.parents.keys():
+            for p1, p2 in pairs(self.parents[node]):
+                moral.add_edge(p1, p2)
+        return moral
+
+    def draw(self):
+        dag = self.get_dag()
+        pos = pygraphviz_layout(dag, prog='dot')
+        nx.draw(dag, pos, with_labels=True)
+        plt.show()
+
+
+class TWBayesianNetwork(BayesianNetwork):
+    def __init__(self, tw=0, elim_order=None, *args, **kwargs):
+        self.tw = tw
+        self.elim_order = elim_order
+        self.td = None
+        super().__init__(*args, **kwargs)
+
+    def done(self):
+        if self.elim_order is None:
+            self.elim_order = list(nx.topological_sort(self.get_dag()))[::-1]
+        self.td = TreeDecomposition(self.get_moralized(), self.elim_order, self.tw)
+
+    def get_triangulated(self, elim_order=None):
+        if elim_order is None: elim_order = self.elim_order
+        assert elim_order is not None, "elim order not specified"
+        triangulated, max_degree = filled_in(self.get_moralized(), self.elim_order)
+        _, max_degree2 = filled_in(self.get_moralized(), self.elim_order[::-1])
+        # print("tw", self.tw, "max degrees", max_degree, max_degree2)
+        assert max_degree2 <= self.tw, "rev failed"
+        return triangulated
+
+
+def run_blip(filename, treewidth, outfile="temp.out", timeout=10, seed=0,
+             solver="kg", logfile="temp.log", debug=False):
+    basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"),
+               f"solver.{solver}", "-v", "1"]
+    args = ["-j", filename, "-w", str(treewidth), "-r", outfile,
+            "-t", str(timeout), "-seed", str(seed), "-l", logfile]
+    cmd = basecmd + args
+    if debug: print("running blip, cmd:", cmd)
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE)
+    if proc.returncode == 0:  # success
+        bn = TWBayesianNetwork(tw=treewidth, input_file=filename)
+        with open(outfile) as out:
+            for line in out:
+                if not line.strip(): continue
+                # if line.startswith("elim-order:"):
+                #     elim_order = line.split()[1].strip("()").split(",")
+                #     bn.elim_order = list(map(int, elim_order))
+                #     if debug: print("elim-order:", bn.elim_order)
+                elif line.startswith("Score:"):
+                    bn.score = float(line.split()[1])
+                else:
+                    vertex, rest = line.split(":")
+                    rest = rest.strip().split()
+                    if len(rest) == 1:
+                        local_score = float(rest[0])
+                        parents = []
+                    else:
+                        local_score, parents = rest
+                        parents = parents.strip("()").split(",")
+                    bn.add(int(vertex), map(int, parents))
+                    if debug: print(f"v:{vertex}, sc:{local_score}, par:{parents})")
+        bn.done()
+        return bn
+    else:  # error
+        print("error encountered, returncode:", proc.returncode)
+        return None
+
+
+if __name__ == '__main__':
+    # res = run_blip("../past-work/blip-publish/data/child-5000.jkl", 10, timeout=2, seed=4)
+    # dag = res.get_dag()
+    # print("acyclic", nx.is_directed_acyclic_graph(dag))
+    # fig, axes = plt.subplots(1, 3)
+    # nx.draw(dag, with_labels=True, ax=axes[0])
+    # moral = res.get_moralized()
+    # nx.draw(moral, with_labels=True, ax=axes[1])
+    # tri = res.get_triangulated()
+    # nx.draw(tri, with_labels=True, ax=axes[2])
+    # fig.show()
+    for seed in range(1,100):
+        print(seed)
+        res = run_blip("../past-work/blip-publish/data/child-5000.jkl", 10, timeout=2, seed=seed, debug=False)
+        tri = res.get_triangulated()
+    print("done")
+
