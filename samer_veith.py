@@ -34,6 +34,7 @@ class SvEncoding:
         self.node_lookup = {self.nodes[n]: n for n in range(0, len(self.nodes))}
         self.node_reverse_lookup = {n: self.nodes[n] for n in range(0, len(self.nodes))}
         self.num_clauses = 0
+        self._sat_header_placeholder = None  # blame: vaidyanathan
 
     def _add_var(self, nm=None):
         self.vars.append(nm if nm is not None else str(len(self.vars)))
@@ -112,6 +113,20 @@ class SvEncoding:
         stream.write("(check-sat)\n")
         stream.write("(get-model)\n")
 
+    def write_sat_placeholder(self, estimated_vars, estimated_clauses):
+        # blame: vaidyanathan
+        placeholder = f"p cnf {estimated_vars} {estimated_clauses}"
+        self.stream.write(placeholder)
+        self.stream.write("\n")
+        self._sat_header_placeholder = placeholder
+
+    def replace_sat_placeholder(self):
+        header = f"p cnf {len(self.vars) - 1} {self.num_clauses}"
+        self.stream.seek(0)
+        self.stream.write(header)
+        for _ in range(len(header), len(self._sat_header_placeholder)):
+            self.stream.write(" ")
+
     def encode_sat(self, target, cardinality=True):
         # We do not know the exact number of variables and clauses beforehand. Leave a placeholder to change afterwards
         # equals to ord + arc + ctr
@@ -120,9 +135,7 @@ class SvEncoding:
         estimated_clauses = 100 * len(self.g.edges) * len(self.g.nodes) \
                             * len(self.g.nodes) * len(self.g.nodes) * len(self.g.nodes)
 
-        placeholder = f"p cnf {estimated_vars} {estimated_clauses}"
-        self.stream.write(placeholder)
-        self.stream.write("\n")
+        self.write_sat_placeholder(estimated_vars, estimated_clauses)
 
         # Init variable references
         self.ord = {x: SelfNamingDict(lambda: self._add_var()) for x in range(0, len(self.g.nodes))}
@@ -137,11 +150,7 @@ class SvEncoding:
         if cardinality:
             self.encode_cardinality_sat(target, self.arc)
 
-        header = f"p cnf {len(self.vars) - 1} {self.num_clauses}"
-        self.stream.seek(0)
-        self.stream.write(header)
-        for _ in range(len(header), len(placeholder)):
-            self.stream.write(" ")
+        self.replace_sat_placeholder()
 
     def encode_cardinality_smt(self, ub):
         for i in range(0, len(self.g.nodes)):
