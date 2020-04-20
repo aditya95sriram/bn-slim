@@ -30,7 +30,7 @@ def pairs(obj):
     return itertools.combinations(obj, 2)
 
 
-class FileReader(object):
+class FileReader(object):  # todo[safety]: add support for `with` usage
     def __init__(self, filename:str, ignore="#"):
         self.file = open(filename)
         self.ignore = ignore
@@ -47,6 +47,9 @@ class FileReader(object):
     def readint(self):
         return int(self.readline().strip())
 
+    def close(self):
+        self.file.close()
+
 
 def stream_jkl(filename: str):
     reader = FileReader(filename, ignore="#")
@@ -60,6 +63,14 @@ def stream_jkl(filename: str):
             parents = frozenset(map(int, parents.split()[1:]))
             psets.append((score, parents))
         yield node, psets
+    reader.close()
+
+
+def num_nodes_jkl(filename: str):
+    reader = FileReader(filename, ignore="#")
+    n = reader.readint()
+    reader.close()
+    return n
 
 
 def read_jkl(filename: str):
@@ -91,6 +102,14 @@ def read_bn(filename: str):
     path, ext = os.path.splitext(filename)
     if ext == ".jkl":
         return read_jkl(filename)
+    else:
+        print(f"unknown file format '{ext}'")
+
+
+def num_nodes_bn(filename: str):
+    path, ext = os.path.splitext(filename)
+    if ext == ".jkl":
+        return num_nodes_jkl(filename)
     else:
         print(f"unknown file format '{ext}'")
 
