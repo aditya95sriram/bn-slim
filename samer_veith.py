@@ -2,6 +2,9 @@
 # author: André Schidler
 
 from collections import defaultdict
+from typing import Callable
+
+from utils import ord_triples
 
 
 class SelfNamingDict(defaultdict):
@@ -34,7 +37,10 @@ class SvEncoding:
         self.node_lookup = {self.nodes[n]: n for n in range(0, len(self.nodes))}
         self.node_reverse_lookup = {n: self.nodes[n] for n in range(0, len(self.nodes))}
         self.num_clauses = 0
-        self._sat_header_placeholder = None  # blame: vaidyanathan
+        self._sat_header_placeholder = None
+        self.num_nodes = len(g.nodes)
+        # set to false by subclasses if they need lazy fill-in edge encoding
+        self.non_improved = True
 
     def _add_var(self, nm=None):
         self.vars.append(nm if nm is not None else str(len(self.vars)))
@@ -55,32 +61,33 @@ class SvEncoding:
         else:
             return -1 * self.ord[j][i]
 
+    def encode_transitivity(self, func: Callable[[int, int], int]):
+        """
+        encode transitivity for a set of variables
+
+        :param func: arity 2 function for which transitivity must be encoded
+        """
+        for i, j, l in ord_triples(range(self.num_nodes)):
+            self._add_clause(-func(i, j), -func(j, l), func(i, l))
+
+    def encode_fillin(self):
+        for i, j, l in ord_triples(range(self.num_nodes)):
+            if j < l:
+                # ord instead of _ord is on purpose in both clauses
+                if self.non_improved:
+                    self._add_clause(-self.arc[i][j], -self.arc[i][l], -self.ord[j][l], self.arc[j][l])
+                    self._add_clause(-self.arc[i][j], -self.arc[i][l], self.ord[j][l], self.arc[l][j])
+
+                # Redundant, but speeds up solving
+                self._add_clause(-self.arc[i][j], -self.arc[i][l], self.arc[j][l], self.arc[l][j])
+
     def encode(self):
-        for i in range(0, len(self.g.nodes)):
-            # No self loops
-            self._add_clause(-self.arc[i][i])
+        for i in range(self.num_nodes):
+            self._add_clause(-self.arc[i][i])  # no self loops
+        self.encode_transitivity(self._ord)
+        self.encode_fillin()
 
-            for j in range(0, len(self.g.nodes)):
-                if i == j:
-                    continue
-                for l in range(0, len(self.g.nodes)):
-                    if i == l or j == l:
-                        continue
-
-                    # Transitivity of ordering
-                    self._add_clause(-self._ord(i, j), -self._ord(j, l), self._ord(i, l))
-
-                    # Additional edges due to linear ordering
-                    if j < l:
-                        # ord instead of _ord is on purpose in both clauses
-                        # TODO: This is necessary in the non-improved encoding...
-                        # self._add_clause(-self.arc[i][j], -self.arc[i][l], -self.ord[j][l], self.arc[j][l])
-                        # self._add_clause(-self.arc[i][j], -self.arc[i][l], self.ord[j][l], self.arc[l][j])
-
-                        # Redundant, but speeds up solving
-                        self._add_clause(-self.arc[i][j], -self.arc[i][l], self.arc[j][l], self.arc[l][j])
-
-        # Encode edges
+    def encode_edges(self):
         for u, v in self.g.edges:
             u = self.node_lookup[u]
             v = self.node_lookup[v]
@@ -114,7 +121,6 @@ class SvEncoding:
         stream.write("(get-model)\n")
 
     def write_sat_placeholder(self, estimated_vars, estimated_clauses):
-        # blame: vaidyanathan
         placeholder = f"p cnf {estimated_vars} {estimated_clauses}"
         self.stream.write(placeholder)
         self.stream.write("\n")
@@ -127,35 +133,40 @@ class SvEncoding:
         for _ in range(len(header), len(self._sat_header_placeholder)):
             self.stream.write(" ")
 
+    def sat_init_vars(self):
+        self.ord = {x: SelfNamingDict(lambda: self._add_var()) for x in range(0, self.num_nodes)}
+        self.arc = {x: SelfNamingDict(lambda: self._add_var()) for x in range(0, self.num_nodes)}
+
+        # Ensure that ord vars are first assigned, so we know the position
+        for i in range(0, self.num_nodes):
+            for j in range(i + 1, self.num_nodes):
+                self._ord(i, j)
+
     def encode_sat(self, target, cardinality=True):
         # We do not know the exact number of variables and clauses beforehand. Leave a placeholder to change afterwards
         # equals to ord + arc + ctr
-        estimated_vars = 2 * len(self.g.nodes) * len(self.g.nodes) + len(self.g.nodes) * len(self.g.nodes) * target
+        estimated_vars = 2 * self.num_nodes * self.num_nodes + self.num_nodes * self.num_nodes * target
         # This is way too much, but better too many than too few: m * n^4 * 100
-        estimated_clauses = 100 * len(self.g.edges) * len(self.g.nodes) \
-                            * len(self.g.nodes) * len(self.g.nodes) * len(self.g.nodes)
+        estimated_clauses = 100 * len(self.g.edges) * self.num_nodes \
+                            * self.num_nodes * self.num_nodes * self.num_nodes
 
         self.write_sat_placeholder(estimated_vars, estimated_clauses)
 
         # Init variable references
-        self.ord = {x: SelfNamingDict(lambda: self._add_var()) for x in range(0, len(self.g.nodes))}
-        self.arc = {x: SelfNamingDict(lambda: self._add_var()) for x in range(0, len(self.g.nodes))}
-
-        # Ensure that ord vars are first assigned, so we know the position
-        for i in range(0, len(self.g.nodes)):
-            for j in range(i+1, len(self.g.nodes)):
-                self._ord(i, j)
+        self.sat_init_vars()
 
         self.encode()
+        self.encode_edges()
+
         if cardinality:
             self.encode_cardinality_sat(target, self.arc)
 
         self.replace_sat_placeholder()
 
     def encode_cardinality_smt(self, ub):
-        for i in range(0, len(self.g.nodes)):
+        for i in range(0, self.num_nodes):
             vars = []
-            for j in range(0, len(self.g.nodes)):
+            for j in range(0, self.num_nodes):
                 if i == j:
                     continue
 
@@ -207,8 +218,7 @@ class SvEncoding:
 if __name__ == '__main__':
     import networkx as nx
 
-    g1 = nx.cycle_graph(5)
-    g1.add_edge(0,2)
+    g1 = nx.grid_2d_graph(5, 5)
     with open("temp.cnf", "w") as f:
         sve = SvEncoding(f, g1)
-        sve.encode_sat(2, cardinality=True)
+        sve.encode_sat(4, cardinality=True)

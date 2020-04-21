@@ -26,8 +26,14 @@ def pick(obj):
 
 def pairs(obj):
     """return all unordered pairs made from
-    elements of obj"""
+    distinct elements of obj"""
     return itertools.combinations(obj, 2)
+
+
+def ord_triples(obj):
+    """return all ordered triples made from
+    distinct elements of obj"""
+    return itertools.permutations(obj, 3)
 
 
 class FileReader(object):  # todo[safety]: add support for `with` usage
