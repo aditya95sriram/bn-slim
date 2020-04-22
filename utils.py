@@ -36,6 +36,15 @@ def ord_triples(obj):
     return itertools.permutations(obj, 3)
 
 
+def posdict_to_ordering(positions: dict):
+    ordering = [-1]*len(positions)
+    for elem, pos in positions.items():
+        ordering[pos] = elem
+    return ordering
+
+
+# i/o utility functions
+
 class FileReader(object):  # todo[safety]: add support for `with` usage
     def __init__(self, filename:str, ignore="#"):
         self.file = open(filename)
@@ -57,17 +66,21 @@ class FileReader(object):  # todo[safety]: add support for `with` usage
         self.file.close()
 
 
-def stream_jkl(filename: str):
+def stream_jkl(filename: str, normalize=True):
     reader = FileReader(filename, ignore="#")
     n = reader.readint()
     for i in range(n):
         psets = []
+        if normalize: minscore = 1e9
         node, numsets = reader.readints()
         for j in range(numsets):
             score, parents = reader.readline().split(sep=" ", maxsplit=1)
             score = float(score)
             parents = frozenset(map(int, parents.split()[1:]))
             psets.append((score, parents))
+            minscore = min(score, minscore)
+        if normalize:
+            psets = [(score - minscore, parents) for score, parents in psets]
         yield node, psets
     reader.close()
 
@@ -79,8 +92,8 @@ def num_nodes_jkl(filename: str):
     return n
 
 
-def read_jkl(filename: str):
-    return dict(stream_jkl(filename))
+def read_jkl(filename: str, normalize=True):
+    return dict(stream_jkl(filename, normalize))
 
 
 def write_jkl(data, filename):
@@ -96,18 +109,18 @@ def write_jkl(data, filename):
                 outfile.write("\n")
 
 
-def stream_bn(filename: str):
+def stream_bn(filename: str, normalize=True):
     path, ext = os.path.splitext(filename)
     if ext == ".jkl":
-        return stream_jkl(filename)
+        return stream_jkl(filename, normalize)
     else:
         print(f"unknown file format '{ext}'")
 
 
-def read_bn(filename: str):
+def read_bn(filename: str, normalize=True):
     path, ext = os.path.splitext(filename)
     if ext == ".jkl":
-        return read_jkl(filename)
+        return read_jkl(filename, normalize)
     else:
         print(f"unknown file format '{ext}'")
 
@@ -118,6 +131,15 @@ def num_nodes_bn(filename: str):
         return num_nodes_jkl(filename)
     else:
         print(f"unknown file format '{ext}'")
+
+
+def read_model(filename: str) -> set:
+    with open(filename) as out:
+        for line in out:
+            if line.startswith("v"):
+                return set(map(int, line.split()[1:]))
+    print("model not found (no line starting with 'v')")
+    return set()
 
 
 # treewidth related functions
@@ -141,7 +163,7 @@ def find_first_by_order(elements: set, order):
 
 
 class TreeDecomposition(object):
-    def __init__(self, graph: nx.Graph, order, width):
+    def __init__(self, graph: nx.Graph, order, width=0):
         self.bags = dict()
         self.decomp = nx.Graph()
         self.graph = graph
@@ -162,7 +184,8 @@ class TreeDecomposition(object):
 
     def decomp_from_ordering(self, graph, order, width):
         graph, max_degree = filled_in(graph, order)
-        assert max_degree <= width, \
+        if width > 0:
+            assert max_degree <= width, \
             f"Treewidth({width}) exceeded by ordering: {order}"
         self.width = max_degree
         revorder = order[::-1]

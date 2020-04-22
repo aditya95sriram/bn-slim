@@ -41,6 +41,7 @@ class SvEncoding:
         self.num_nodes = len(g.nodes)
         # set to false by subclasses if they need lazy fill-in edge encoding
         self.non_improved = True
+        self.header_template = "p cnf {} {}"
 
     def _add_var(self, nm=None):
         self.vars.append(nm if nm is not None else str(len(self.vars)))
@@ -121,13 +122,13 @@ class SvEncoding:
         stream.write("(get-model)\n")
 
     def write_sat_placeholder(self, estimated_vars, estimated_clauses):
-        placeholder = f"p cnf {estimated_vars} {estimated_clauses}"
+        placeholder = self.header_template.format(estimated_vars, estimated_clauses)
         self.stream.write(placeholder)
         self.stream.write("\n")
         self._sat_header_placeholder = placeholder
 
     def replace_sat_placeholder(self):
-        header = f"p cnf {len(self.vars) - 1} {self.num_clauses}"
+        header = self.header_template.format(len(self.vars) - 1, self.num_clauses)
         self.stream.seek(0)
         self.stream.write(header)
         for _ in range(len(header), len(self._sat_header_placeholder)):
@@ -147,7 +148,8 @@ class SvEncoding:
         # equals to ord + arc + ctr
         estimated_vars = 2 * self.num_nodes * self.num_nodes + self.num_nodes * self.num_nodes * target
         # This is way too much, but better too many than too few: m * n^4 * 100
-        estimated_clauses = 100 * len(self.g.edges) * self.num_nodes \
+        num_edges = max(self.g.number_of_edges(), self.num_nodes)
+        estimated_clauses = 100 * num_edges * self.num_nodes \
                             * self.num_nodes * self.num_nodes * self.num_nodes
 
         self.write_sat_placeholder(estimated_vars, estimated_clauses)

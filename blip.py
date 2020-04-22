@@ -55,6 +55,8 @@ class TWBayesianNetwork(BayesianNetwork):
         if self.elim_order is None:
             self.elim_order = list(nx.topological_sort(self.get_dag()))[::-1]
         self.td = TreeDecomposition(self.get_moralized(), self.elim_order, self.tw)
+        if self.tw <= 0:
+            self.tw = self.td.width
 
     def get_triangulated(self, elim_order=None):
         if elim_order is None: elim_order = self.elim_order
@@ -62,7 +64,7 @@ class TWBayesianNetwork(BayesianNetwork):
         triangulated, max_degree = filled_in(self.get_moralized(), self.elim_order)
         _, max_degree2 = filled_in(self.get_moralized(), self.elim_order[::-1])
         # print("tw", self.tw, "max degrees", max_degree, max_degree2)
-        assert max_degree2 <= self.tw, "rev failed"
+        assert max_degree <= self.tw, "rev top order failed"
         return triangulated
 
 
@@ -70,8 +72,9 @@ def run_blip(filename, treewidth, outfile="temp.out", timeout=10, seed=0,
              solver="kg", logfile="temp.log", debug=False):
     basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"),
                f"solver.{solver}", "-v", "1"]
-    args = ["-j", filename, "-w", str(treewidth), "-r", outfile,
+    args = ["-j", filename, "-w", str(treewidth-1), "-r", outfile,
             "-t", str(timeout), "-seed", str(seed), "-l", logfile]
+    # blip width convention is off by one (trees have width 2)
     cmd = basecmd + args
     if debug: print("running blip, cmd:", cmd)
     proc = subprocess.run(cmd, stdout=subprocess.PIPE)
