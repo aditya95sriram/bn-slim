@@ -3,7 +3,7 @@
 import networkx as nx
 import itertools
 import random
-from typing import Union, Tuple
+from typing import Union, Tuple, Dict, List, Iterator
 import sys, os
 from operator import itemgetter
 
@@ -65,13 +65,18 @@ class FileReader(object):  # todo[safety]: add support for `with` usage
     def close(self):
         self.file.close()
 
+# bn datatypes
+Psets = List[Tuple[float, frozenset]]
+BNStream = Iterator[Tuple[int, Psets]]
+BNData = Dict[int, Psets]
+
 
 def stream_jkl(filename: str, normalize=True):
     reader = FileReader(filename, ignore="#")
     n = reader.readint()
     for i in range(n):
         psets = []
-        if normalize: minscore = 1e9
+        minscore = 1e9
         node, numsets = reader.readints()
         for j in range(numsets):
             score, parents = reader.readline().split(sep=" ", maxsplit=1)
@@ -85,15 +90,15 @@ def stream_jkl(filename: str, normalize=True):
     reader.close()
 
 
+def read_jkl(filename: str, normalize=True):
+    return dict(stream_jkl(filename, normalize))
+
+
 def num_nodes_jkl(filename: str):
     reader = FileReader(filename, ignore="#")
     n = reader.readint()
     reader.close()
     return n
-
-
-def read_jkl(filename: str, normalize=True):
-    return dict(stream_jkl(filename, normalize))
 
 
 def write_jkl(data, filename):
@@ -109,7 +114,7 @@ def write_jkl(data, filename):
                 outfile.write("\n")
 
 
-def stream_bn(filename: str, normalize=True):
+def stream_bn(filename: str, normalize=True) -> BNStream:
     path, ext = os.path.splitext(filename)
     if ext == ".jkl":
         return stream_jkl(filename, normalize)
@@ -117,20 +122,24 @@ def stream_bn(filename: str, normalize=True):
         print(f"unknown file format '{ext}'")
 
 
-def read_bn(filename: str, normalize=True):
-    path, ext = os.path.splitext(filename)
-    if ext == ".jkl":
-        return read_jkl(filename, normalize)
-    else:
-        print(f"unknown file format '{ext}'")
+def read_bn(filename: str, normalize=True) -> BNData:
+    return dict(stream_bn(filename, normalize))
 
 
-def num_nodes_bn(filename: str):
+def num_nodes_bn(filename: str) -> int:
     path, ext = os.path.splitext(filename)
     if ext == ".jkl":
         return num_nodes_jkl(filename)
     else:
         print(f"unknown file format '{ext}'")
+
+
+def filter_stream_bn(filename: str, filterset, normalize=True) -> BNStream:
+    return filter(lambda a: a[0] in filterset, stream_bn(filename, normalize))
+
+
+def filter_read_bn(filename: str, filterset, normalize=True) -> BNData:
+    return dict(filter_stream_bn(filename, filterset, normalize))
 
 
 def read_model(filename: str) -> set:
@@ -164,7 +173,7 @@ def find_first_by_order(elements: set, order):
 
 class TreeDecomposition(object):
     def __init__(self, graph: nx.Graph, order, width=0):
-        self.bags = dict()
+        self.bags: Dict[int, frozenset] = dict()
         self.decomp = nx.Graph()
         self.graph = graph
         self.elim_order = order
@@ -209,6 +218,25 @@ class TreeDecomposition(object):
         nx.draw(self.decomp, pos)
         nx.draw_networkx_labels(self.decomp, pos, labels=labels)
         plt.show()
+
+    def replace(self, selected, new_td: 'TreeDecomposition'):
+        # delete old bags which are going to be replaced
+        covered_nodes = set()
+        for sel_idx in selected:
+            covered_nodes.update(self.bags[sel_idx])
+            del self.bags[sel_idx]
+            self.decomp.remove_node(sel_idx)
+
+        remap = dict()
+        # add new bags
+        for old_idx, bag in new_td.bags.items():
+            new_idx = self.add_bag(bag)
+            remap[old_idx] = new_idx
+        # add new edges
+        for b1, b2 in new_td.decomp.edges:
+            self.decomp.add_edge(remap[b1], remap[b2])
+
+        # todo[crit]: connect new bags to ones outside selected
 
 
 if __name__ == '__main__':
