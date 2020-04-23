@@ -135,7 +135,10 @@ def num_nodes_bn(filename: str) -> int:
 
 
 def filter_stream_bn(filename: str, filterset, normalize=True) -> BNStream:
-    return filter(lambda a: a[0] in filterset, stream_bn(filename, normalize))
+    for node, psets in stream_bn(filename, normalize):
+        if node in filterset:
+            filtered = list(filter(lambda a: a[1].issubset(filterset), psets))
+            yield node, filtered
 
 
 def filter_read_bn(filename: str, filterset, normalize=True) -> BNData:
