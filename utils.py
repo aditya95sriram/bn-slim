@@ -46,7 +46,7 @@ def posdict_to_ordering(positions: dict):
 # i/o utility functions
 
 class FileReader(object):  # todo[safety]: add support for `with` usage
-    def __init__(self, filename:str, ignore="#"):
+    def __init__(self, filename: str, ignore="#"):
         self.file = open(filename)
         self.ignore = ignore
 
@@ -64,6 +64,7 @@ class FileReader(object):  # todo[safety]: add support for `with` usage
 
     def close(self):
         self.file.close()
+
 
 # bn datatypes
 Psets = Dict[frozenset, float]
@@ -146,6 +147,21 @@ def filter_read_bn(filename: str, filterset, normalize=True) -> BNData:
     return dict(filter_stream_bn(filename, filterset, normalize))
 
 
+def get_bn_stats(filename: str) -> Tuple[float, Dict[int, float]]:
+    """
+    returns sum of all scores and node-wise offsets used for normalizing
+    :param filename:
+    :return:  (sum_score, Dict[node, min_score])
+    """
+    sum_score = 0
+    offsets = dict()
+    for node, psets in stream_bn(filename, normalize=False):
+        scores = psets.values()
+        sum_score += sum(scores)
+        offsets[node] = min(scores)
+    return sum_score, offsets
+
+
 def read_model(filename: str) -> set:
     with open(filename) as out:
         for line in out:
@@ -199,7 +215,7 @@ class TreeDecomposition(object):
         graph, max_degree = filled_in(graph, order)
         if width > 0:
             assert max_degree <= width, \
-            f"Treewidth({width}) exceeded by ordering: {order}"
+                f"Treewidth({width}) exceeded by ordering: {order}"
         self.width = max_degree
         revorder = order[::-1]
         cur_nodes = set(revorder[:width+1])
@@ -215,6 +231,13 @@ class TreeDecomposition(object):
                 parent = root_bag
             bag_idx = self.add_bag(neighbors | {u}, parent)
             blame[u] = bag_idx
+
+    def get_boundary_intersections(self, selected) -> Dict[int, Dict[int, frozenset]]:
+        intersections = {bag_id: dict() for bag_id in selected}
+        for bag_id, nbr_id in nx.edge_boundary(self.decomp, selected):
+            assert bag_id in selected, "edge boundary pattern assumption failed"
+            intersections[bag_id][nbr_id] = self.bags[bag_id] & self.bags[nbr_id]
+        return intersections
 
     def draw(self):
         labels = {bag_idx: f"{bag_idx}{list(bag)}" for (bag_idx, bag) in self.bags.items()}
@@ -233,14 +256,23 @@ class TreeDecomposition(object):
 
         remap = dict()
         # add new bags
-        for old_idx, bag in new_td.bags.items():
-            new_idx = self.add_bag(bag)
-            remap[old_idx] = new_idx
+        for old_id, bag in new_td.bags.items():
+            new_id = self.add_bag(bag)
+            remap[old_id] = new_id
         # add new edges
         for b1, b2 in new_td.decomp.edges:
             self.decomp.add_edge(remap[b1], remap[b2])
 
-        # todo[crit]: connect new bags to ones outside selected
+        # connect new bags to those outside selected
+        # todo[try]: Dict[intersection -> (in_id, out_id)]
+        # todo[opt]: smart patching (avoid brute force, use elim ordering td)
+        for old_id, nbrs in self.get_boundary_intersections(selected):
+            for nbr_id, intersection in nbrs.items():
+                # find bag in new_td which contains intersection
+                for new_id, bag in new_td.bags:
+                    if intersection.issubset(bag):
+                        self.decomp.add_edge(new_id, nbr_id)
+                        break  # out of `for new_id, bag`
 
 
 if __name__ == '__main__':

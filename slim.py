@@ -73,20 +73,10 @@ def prepare_subtree(bn: BayesianNetwork, td: TreeDecomposition, bag_ids: set,
     leaf_bag_ids = set()
     leaf_nodes = set()
     forced_cliques = []
-    # for bag_id in bag_ids:
-    #     is_leaf = False
-    #     for nbr_id in td.decomp.neighbors(bag_id):
-    #         if nbr_id in bag_ids: continue
-    #         is_leaf = True
-    #         common = td.bags[bag_id] & td.bags[nbr_id]
-    #         leaf_nodes.update(common)
-    #     if is_leaf: leaf_bag_ids.add(bag_id)
-    for bag_id, nbr_id in nx.edge_boundary(td.decomp, bag_ids):
-        assert bag_id in bag_ids, "edge boundary pattern assumption failed"
-        leaf_bag_ids.add(bag_id)
-        common = td.bags[bag_id] & td.bags[nbr_id]
-        forced_cliques.append(common)
-        leaf_nodes.update(common)
+    for bag_id, nbrs in td.get_boundary_intersections(bag_ids).items():
+        for nbr_id, intersection in nbrs.items():
+            forced_cliques.append(intersection)
+            leaf_nodes.update(intersection)
 
     # compute forced parent data for leaf nodes
     if debug: print(f"leaf bags: {leaf_bag_ids}\tleaf nodes:{leaf_nodes}")
@@ -108,8 +98,6 @@ def prepare_subtree(bn: BayesianNetwork, td: TreeDecomposition, bag_ids: set,
     # construct forced clique edges on leaf nodes per bag
     if debug: print(f"clique sets: {forced_cliques}")
     return forced_parents, forced_cliques
-
-
 
 
 if __name__ == '__main__':
