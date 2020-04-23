@@ -66,7 +66,7 @@ class FileReader(object):  # todo[safety]: add support for `with` usage
         self.file.close()
 
 # bn datatypes
-Psets = List[Tuple[float, frozenset]]
+Psets = Dict[frozenset, float]
 BNStream = Iterator[Tuple[int, Psets]]
 BNData = Dict[int, Psets]
 
@@ -75,17 +75,17 @@ def stream_jkl(filename: str, normalize=True):
     reader = FileReader(filename, ignore="#")
     n = reader.readint()
     for i in range(n):
-        psets = []
+        psets: Psets = dict()
         minscore = 1e9
         node, numsets = reader.readints()
         for j in range(numsets):
             score, parents = reader.readline().split(sep=" ", maxsplit=1)
             score = float(score)
             parents = frozenset(map(int, parents.split()[1:]))
-            psets.append((score, parents))
+            psets[parents] = score
             minscore = min(score, minscore)
         if normalize:
-            psets = [(score - minscore, parents) for score, parents in psets]
+            psets = {pset: score-minscore for pset, score in psets.items()}
         yield node, psets
     reader.close()
 
@@ -107,7 +107,7 @@ def write_jkl(data, filename):
         outfile.write(f"{n}\n")
         for node, psets in sorted(data.items(), key=itemgetter(0)):
             outfile.write(f"{node} {len(psets)}\n")
-            for score, parents in psets:
+            for parents, score in psets.items():
                 outfile.write(f"{score:.4f} {len(parents)}")
                 for parent in sorted(parents):
                     outfile.write(f" {parent}")
@@ -137,7 +137,8 @@ def num_nodes_bn(filename: str) -> int:
 def filter_stream_bn(filename: str, filterset, normalize=True) -> BNStream:
     for node, psets in stream_bn(filename, normalize):
         if node in filterset:
-            filtered = list(filter(lambda a: a[1].issubset(filterset), psets))
+            filtered = {pset: score for pset, score in psets.items()
+                                    if pset.issubset(filterset)}
             yield node, filtered
 
 
