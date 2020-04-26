@@ -162,13 +162,17 @@ def get_bn_stats(filename: str) -> Tuple[float, Dict[int, float]]:
     return sum_score, offsets
 
 
-def read_model(filename: str) -> set:
+def read_model(output: Union[str, List[str]]) -> set:
+    if isinstance(output, str):
+        output = output.split("\n")
+    for line in output:
+        if line.startswith("v"):
+            return set(map(int, line.split()[1:]))
+    raise ValueError("model not found (no line starting with 'v')")
+
+def read_model_from_file(filename: str) -> set:
     with open(filename) as out:
-        for line in out:
-            if line.startswith("v"):
-                return set(map(int, line.split()[1:]))
-    print("model not found (no line starting with 'v')")
-    return set()
+        return read_model(out)
 
 
 # treewidth related functions
@@ -216,12 +220,14 @@ class TreeDecomposition(object):
         if width > 0:
             assert max_degree <= width, \
                 f"Treewidth({width}) exceeded by ordering: {order}"
-        self.width = max_degree
+            self.width = width
+        else:
+            self.width = max_degree
         revorder = order[::-1]
-        cur_nodes = set(revorder[:width+1])
+        cur_nodes = set(revorder[:self.width+1])
         root_bag = self.add_bag(cur_nodes)
         blame = {node: root_bag for node in cur_nodes}
-        for u in revorder[width+1:]:
+        for u in revorder[self.width+1:]:
             cur_nodes.add(u)
             neighbors = set(graph.subgraph(cur_nodes).neighbors(u))
             if neighbors:
@@ -231,6 +237,29 @@ class TreeDecomposition(object):
                 parent = root_bag
             bag_idx = self.add_bag(neighbors | {u}, parent)
             blame[u] = bag_idx
+        self.verify()
+
+    def verify(self):
+        # check if tree
+        assert nx.is_tree(self.decomp), "decomp is not a tree"
+        # check width
+        max_bag_size = max(map(len, self.bags.values()))
+        assert max_bag_size <= self.width + 1, \
+            f"decomp width too high ({max_bag_size} > {self.width + 1})"
+        # check vertex connected subtree
+        for node in self.graph.nodes:
+            bags_containing = [bag_id for bag_id in self.bags
+                               if node in self.bags[bag_id]]
+            assert nx.is_connected(self.decomp.subgraph(bags_containing)), \
+                f"subtree for vertex {node} is not connected"
+        # check if every edge covered
+        for edge in self.graph.edges:
+            for bag in self.bags.values():
+                if bag.issuperset(edge):
+                    break
+            else:
+                raise AssertionError(f"edge {edge} not covered by decomp")
+            continue
 
     def get_boundary_intersections(self, selected) -> Dict[int, Dict[int, frozenset]]:
         intersections = {bag_id: dict() for bag_id in selected}
@@ -266,7 +295,7 @@ class TreeDecomposition(object):
         # connect new bags to those outside selected
         # todo[try]: Dict[intersection -> (in_id, out_id)]
         # todo[opt]: smart patching (avoid brute force, use elim ordering td)
-        for old_id, nbrs in self.get_boundary_intersections(selected):
+        for old_id, nbrs in self.get_boundary_intersections(selected).items():
             for nbr_id, intersection in nbrs.items():
                 # find bag in new_td which contains intersection
                 for new_id, bag in new_td.bags:
