@@ -3,8 +3,10 @@
 import subprocess
 import os
 import networkx as nx
+import random
+from typing import Optional
 
-from utils import filled_in, TreeDecomposition, pairs
+from utils import filled_in, TreeDecomposition, pairs, stream_bn, get_bn_stats
 
 import matplotlib.pyplot as plt
 from networkx.drawing.nx_agraph import pygraphviz_layout
@@ -13,10 +15,24 @@ SOLVER_DIR = "../solvers"
 
 
 class BayesianNetwork(object):
-    def __init__(self, input_file=None, parents=None, score=None):
+    def __init__(self, input_file, data=None, parents=None):
         self.parents = dict() if parents is None else parents
-        self.score = score
         self.input_file = input_file
+        self.data = data
+        self.sum_scores, self.offsets = get_bn_stats(self.input_file)
+
+    def compute_score(self, subset: set=None):
+        """recompute score based on parents sets"""
+        if self.data is None:
+            data = stream_bn(self.input_file, normalize=True)
+        else:
+            data = self.data  # data is assumed to be normalized
+        score = 0
+        for node, psets in data:
+            if node in self.parents:  # could be a bn with a subset of nodes
+                if subset is None or node in subset:
+                    score += psets[self.parents[node]] + self.offsets[node]
+        return score
 
     def add(self, node, parents):
         self.parents[node] = frozenset(parents)
@@ -43,18 +59,32 @@ class BayesianNetwork(object):
         nx.draw(dag, pos, with_labels=True)
         plt.show()
 
+    def replace(self, newbn: 'BayesianNetwork'):
+        for node, new_parents in newbn.parents.items():
+            self.parents[node] = new_parents
+
 
 class TWBayesianNetwork(BayesianNetwork):
-    def __init__(self, tw=0, elim_order=None, *args, **kwargs):
+    def __init__(self, input_file, tw=0, elim_order=None, *args, **kwargs):
+        super().__init__(input_file, *args, **kwargs)
         self.tw = tw
         self.elim_order = elim_order
-        self.td = None
-        super().__init__(*args, **kwargs)
+        self._td: Optional[TreeDecomposition] = None
+
+    @property
+    def td(self) -> TreeDecomposition:
+        if self._td is None:
+            raise RuntimeError("td requested before finalizing (call `.done`)")
+        return self._td
 
     def done(self):
+        """
+        compute and store tree decomp and width based on
+        elim_order(default: reverse topological order of the dag)
+        """
         if self.elim_order is None:
             self.elim_order = list(nx.topological_sort(self.get_dag()))[::-1]
-        self.td = TreeDecomposition(self.get_moralized(), self.elim_order, self.tw)
+        self._td = TreeDecomposition(self.get_moralized(), self.elim_order, self.tw)
         if self.tw <= 0:
             self.tw = self.td.width
 
@@ -72,7 +102,7 @@ def run_blip(filename, treewidth, outfile="temp.out", timeout=10, seed=0,
              solver="kg", logfile="temp.log", debug=False):
     basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"),
                f"solver.{solver}", "-v", "1"]
-    args = ["-j", filename, "-w", str(treewidth-1), "-r", outfile,
+    args = ["-j", filename, "-w", str(treewidth+1), "-r", outfile,
             "-t", str(timeout), "-seed", str(seed), "-l", logfile]
     # blip width convention is off by one (trees have width 2)
     cmd = basecmd + args
@@ -83,10 +113,6 @@ def run_blip(filename, treewidth, outfile="temp.out", timeout=10, seed=0,
         with open(outfile) as out:
             for line in out:
                 if not line.strip(): continue
-                # if line.startswith("elim-order:"):
-                #     elim_order = line.split()[1].strip("()").split(",")
-                #     bn.elim_order = list(map(int, elim_order))
-                #     if debug: print("elim-order:", bn.elim_order)
                 elif line.startswith("Score:"):
                     bn.score = float(line.split()[1])
                 else:
