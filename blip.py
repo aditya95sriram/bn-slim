@@ -6,7 +6,7 @@ import networkx as nx
 import random
 from typing import Optional
 
-from utils import filled_in, TreeDecomposition, pairs, stream_bn, get_bn_stats
+from utils import filled_in, TreeDecomposition, pairs, stream_bn, get_bn_stats, filter_read_bn
 
 import matplotlib.pyplot as plt
 from networkx.drawing.nx_agraph import pygraphviz_layout
@@ -20,13 +20,17 @@ class BayesianNetwork(object):
         self.input_file = input_file
         self.data = data
         self.sum_scores, self.offsets = get_bn_stats(self.input_file)
+        self._dag = None
 
     def compute_score(self, subset: set=None):
         """recompute score based on parents sets"""
         if self.data is None:
-            data = stream_bn(self.input_file, normalize=True)
+            if subset is None:
+                data = stream_bn(self.input_file, normalize=True)
+            else:
+                data = filter_read_bn(self.input_file, subset, normalize=True).items()
         else:
-            data = self.data  # data is assumed to be normalized
+            data = self.data.items()  # data is assumed to be normalized
         score = 0
         for node, psets in data:
             if node in self.parents:  # could be a bn with a subset of nodes
@@ -36,25 +40,34 @@ class BayesianNetwork(object):
 
     def add(self, node, parents):
         self.parents[node] = frozenset(parents)
+        self._dag = None  # cached dag no longer valid
 
-    def get_dag(self):  # todo[opt]: cache dag, don't recompute
+    def recompute_dag(self):
         dag = nx.DiGraph()
         for node in self.parents.keys():
             dag.add_node(node)
             for parent in self.parents[node]:
                 dag.add_edge(parent, node)
-        return dag
+        self._dag = dag
+
+    @property
+    def dag(self) -> nx.DiGraph:
+        if self._dag is None:
+            self.recompute_dag()
+        return self._dag
+
+    def verify(self):
+        assert nx.is_directed_acyclic_graph(self.dag), "network is not acyclic"
 
     def get_moralized(self):
-        dag = self.get_dag()
-        moral = dag.to_undirected()
+        moral = self.dag.to_undirected()
         for node in self.parents.keys():
             for p1, p2 in pairs(self.parents[node]):
                 moral.add_edge(p1, p2)
         return moral
 
     def draw(self):
-        dag = self.get_dag()
+        dag = self.dag
         pos = pygraphviz_layout(dag, prog='dot')
         nx.draw(dag, pos, with_labels=True)
         plt.show()
@@ -83,10 +96,14 @@ class TWBayesianNetwork(BayesianNetwork):
         elim_order(default: reverse topological order of the dag)
         """
         if self.elim_order is None:
-            self.elim_order = list(nx.topological_sort(self.get_dag()))[::-1]
+            self.elim_order = list(nx.topological_sort(self.dag))[::-1]
         self._td = TreeDecomposition(self.get_moralized(), self.elim_order, self.tw)
         if self.tw <= 0:
             self.tw = self.td.width
+
+    def verify(self):
+        super().verify()
+        self.td.verify()
 
     def get_triangulated(self, elim_order=None):
         if elim_order is None: elim_order = self.elim_order

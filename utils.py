@@ -3,7 +3,7 @@
 import networkx as nx
 import itertools
 import random
-from typing import Union, Tuple, Dict, List, Iterator
+from typing import Union, Tuple, Dict, List, Iterator, FrozenSet, TextIO
 import sys, os
 from operator import itemgetter
 
@@ -67,7 +67,7 @@ class FileReader(object):  # todo[safety]: add support for `with` usage
 
 
 # bn datatypes
-Psets = Dict[frozenset, float]
+Psets = Dict[FrozenSet[int], float]
 BNStream = Iterator[Tuple[int, Psets]]
 BNData = Dict[int, Psets]
 
@@ -138,9 +138,7 @@ def num_nodes_bn(filename: str) -> int:
 def filter_stream_bn(filename: str, filterset, normalize=True) -> BNStream:
     for node, psets in stream_bn(filename, normalize):
         if node in filterset:
-            filtered = {pset: score for pset, score in psets.items()
-                                    if pset.issubset(filterset)}
-            yield node, filtered
+            yield node, psets
 
 
 def filter_read_bn(filename: str, filterset, normalize=True) -> BNData:
@@ -162,7 +160,7 @@ def get_bn_stats(filename: str) -> Tuple[float, Dict[int, float]]:
     return sum_score, offsets
 
 
-def read_model(output: Union[str, List[str]]) -> set:
+def read_model(output: Union[str, TextIO]) -> set:
     if isinstance(output, str):
         output = output.split("\n")
     for line in output:
@@ -276,13 +274,6 @@ class TreeDecomposition(object):
         plt.show()
 
     def replace(self, selected, new_td: 'TreeDecomposition'):
-        # delete old bags which are going to be replaced
-        covered_nodes = set()
-        for sel_idx in selected:
-            covered_nodes.update(self.bags[sel_idx])
-            del self.bags[sel_idx]
-            self.decomp.remove_node(sel_idx)
-
         remap = dict()
         # add new bags
         for old_id, bag in new_td.bags.items():
@@ -298,10 +289,28 @@ class TreeDecomposition(object):
         for old_id, nbrs in self.get_boundary_intersections(selected).items():
             for nbr_id, intersection in nbrs.items():
                 # find bag in new_td which contains intersection
-                for new_id, bag in new_td.bags:
+                for new_id, bag in new_td.bags.items():
                     if intersection.issubset(bag):
                         self.decomp.add_edge(new_id, nbr_id)
                         break  # out of `for new_id, bag`
+
+        # delete old bags which are going to be replaced
+        covered_nodes = set()
+        for sel_idx in selected:
+            covered_nodes.update(self.bags[sel_idx])
+            del self.bags[sel_idx]
+            self.decomp.remove_node(sel_idx)
+
+
+    def bag_containing(self, members: Union[set, frozenset]) -> int:
+        """
+        returns the id of a bag containing given members
+        if no such bag exists, returns -1
+        """
+        for bag_id, bag in self.bags.items():
+            if bag.issuperset(members):
+                return bag_id
+        return -1
 
 
 if __name__ == '__main__':

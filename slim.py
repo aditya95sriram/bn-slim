@@ -4,11 +4,12 @@
 import os, sys
 import networkx as nx
 import random
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Set, FrozenSet
+from pprint import pprint
 
 # internal
 from blip import run_blip, BayesianNetwork, TWBayesianNetwork
-from utils import TreeDecomposition, pick, pairs, filter_read_bn, BNData
+from utils import TreeDecomposition, pick, pairs, filter_read_bn, BNData, stream_bn
 from berg_encoding import solve_bn
 
 # optional
@@ -54,7 +55,7 @@ def find_subtree(td: TreeDecomposition, budget:int, debug=False):
 
 
 def handle_acyclicity(bn: BayesianNetwork, seen: set, leaf_nodes: set, debug=False):
-    dag = bn.get_dag()
+    dag = bn.dag
     inner_nodes = seen - leaf_nodes
     outer_nodes = dag.nodes - inner_nodes
     subdag = nx.subgraph_view(dag, outer_nodes.__contains__,
@@ -63,7 +64,7 @@ def handle_acyclicity(bn: BayesianNetwork, seen: set, leaf_nodes: set, debug=Fal
         nx.draw(subdag, pygraphviz_layout(subdag), with_labels=True)
         plt.show()
     forced_arcs = []
-    if debug: print(f"nodes leaf:{leaf_nodes}\tinner:{inner_nodes}\touter:{outer_nodes}")
+    if debug: print(f"nodes leaf:{leaf_nodes}\tinner:{inner_nodes}")
     for src, dest in pairs(leaf_nodes):
         if nx.has_path(subdag, src, dest):
             forced_arcs.append((src, dest))
@@ -71,68 +72,102 @@ def handle_acyclicity(bn: BayesianNetwork, seen: set, leaf_nodes: set, debug=Fal
         else:
             # only check if prev path not found
             if nx.has_path(subdag, dest, src):
-                forced_arcs.append(dest, src)
+                forced_arcs.append((dest, src))
                 if debug: print(f"added forced {dest}->{src}")
     return forced_arcs
 
 
 def prepare_subtree(bn: TWBayesianNetwork, bag_ids: set, seen: set, debug=False):
-    # compute leaf bag ids
     # compute leaf nodes (based on intersection of leaf bags with outside)
-    leaf_bag_ids = set()
-    leaf_nodes = set()
+    boundary_nodes = set()
     forced_cliques = []
     for bag_id, nbrs in bn.td.get_boundary_intersections(bag_ids).items():
         for nbr_id, intersection in nbrs.items():
-            forced_cliques.append(intersection)
-            leaf_nodes.update(intersection)
+            boundary_nodes.update(intersection)
+            if len(intersection) > 1:
+                forced_cliques.append(intersection)
+    if debug: print(f"clique sets: {forced_cliques}")
 
     # compute forced parent data for leaf nodes
-    if debug: print(f"leaf bags: {leaf_bag_ids}\tleaf nodes:{leaf_nodes}")
-    forced_arcs = handle_acyclicity(bn, seen, leaf_nodes, debug)
+    if debug: print(f"boundary nodes:{boundary_nodes}")
+    forced_arcs = handle_acyclicity(bn, seen, boundary_nodes, debug)
     if debug: print("forced arcs", forced_arcs)
 
-    # copy over bn data for inner nodes respecting forced parents
-    # input_data = read_bn(start_bn.input_file)
-    # new_input = {node: input_data[node] for node in seen - leaf_nodes}
-    # for node in leaf_nodes:
-    #     forced = forced_parents[node]
-    #     # new_parents = list(filter(lambda p: forced.issubset(p[1]), input_data[node]))
-    #     new_parents = []
-    #     for score, parents in input_data[node]:
-    #         if forced.issubset(parents):
-    #             new_parents.append((score, parents))
-    #     new_input[node] = new_parents
+    data, substitutions = get_data_for_subtree(bn, boundary_nodes, seen)
 
-    # construct forced clique edges on leaf nodes per bag
-    if debug: print(f"clique sets: {forced_cliques}")
-    return forced_arcs, forced_cliques
+    return forced_arcs, forced_cliques, data, substitutions
 
 
-def get_data_for_subtree(filename: str, seen: set,
-                         forced_arcs: List[Tuple[int, int]]) -> BNData:
-    data = filter_read_bn(filename, seen)
-    # new_data: BNData = dict()
-    # for node, psets in data.items():
-    #     new_data[node] = {pset: score for pset, score in psets.items()
-    #                       if pset.issubset(forced_arcs[node])}
-    return data  # todo[think]: new_data or data?
+def get_data_for_subtree(bn: TWBayesianNetwork, boundary_nodes: set, seen: set) \
+        -> Tuple[BNData, Dict[int, Dict[frozenset, frozenset]]]:
+    # compute downstream global green vertices
+    downstream = set()
+    for node in boundary_nodes:
+        for layer, successors in nx.bfs_successors(bn.dag, node):
+            downstream.update(successors)
+    downstream -= seen  # ignore local red vertices
+
+    # construct score function data for local instance
+    data = {node: dict() for node in seen}
+    substitutions = {node: dict() for node in seen}
+    for node, psets in filter_read_bn(bn.input_file, seen).items():
+        if node in boundary_nodes:
+            # cur_pset = set(bn.dag.predecessors(node))
+            for pset, score in psets.items():
+                pset_in = pset.intersection(seen)
+                # all internal vertices, so allowed
+                if len(pset_in) == len(pset):
+                    data[node][pset] = score
+                else:
+                    pset_out = pset - pset_in
+                    if not pset_out.issubset(downstream):
+                        continue  # reject
+                    bag_id = bn.td.bag_containing(pset | {node})
+                    if bag_id == -1:
+                        continue  # reject
+                    if pset_in in data[node]:
+                        if data[node][pset_in] < score:
+                            data[node][pset_in] = score
+                            substitutions[node][pset_in] = pset
+                    else:
+                        data[node][pset_in] = score
+                        substitutions[node][pset_in] = pset
+        else:  # internal node
+            for pset, score in psets.items():
+                # internal vertices are not allowed outside parents
+                if pset.issubset(seen):
+                    data[node][pset] = score
+    return data, substitutions
 
 
 def slimpass(bn: TWBayesianNetwork, budget: int, debug=False):
     td = bn.td
     tw = td.width
     selected, seen = find_subtree(td, budget, debug=False)
-    nx.draw(bn.get_dag().subgraph(seen), with_labels=True)
-    plt.show()
-    forced_arcs, forced_cliques = prepare_subtree(bn, selected, seen, debug=False)
-    new_data = get_data_for_subtree(bn.input_file, seen, forced_arcs)
-    for node in seen:
-        parents = bn.parents[node]
-        print(node, parents, new_data[node][parents])
+    forced_arcs, forced_cliques, data, subs = prepare_subtree(bn, selected, seen, debug)
+    if debug:
+        print("filtered data:-")
+        pprint(data)
     old_score = bn.compute_score(seen)
-    replbn = solve_bn(new_data, tw, bn.input_file, forced_arcs, forced_cliques)
+    pos = pygraphviz_layout(bn.dag, prog='dot')
+    if debug:
+        print("old parents:-")
+        pprint({node: par for node, par in bn.parents.items() if node in seen})
+        nx.draw(bn.dag.subgraph(seen), pos, with_labels=True)
+        plt.show()
+    replbn = solve_bn(data, tw, bn.input_file, forced_arcs, forced_cliques)
+    # perform substitutions
+    for node, pset in replbn.parents.items():
+        if pset in subs[node]:
+            if debug: print(f"performed substition {pset}->{subs[node][pset]}")
+            replbn.parents[node] = subs[node][pset]
+    replbn.recompute_dag()
     new_score = replbn.compute_score()
+    if debug:
+        print("new parents:-")
+        pprint(replbn.parents)
+        nx.draw(replbn.dag, pos, with_labels=True)
+        plt.show()
     if debug: print(f"score change: {old_score:.3f} -> {new_score:.3f}")
     if new_score > old_score:
         print(f"improvement found ({old_score:.3f}->{new_score:.3f}), updating...")
@@ -140,6 +175,9 @@ def slimpass(bn: TWBayesianNetwork, budget: int, debug=False):
         td.replace(selected, replbn.td)
         # update bn with new bn
         bn.replace(replbn)
+        bn.verify()
+    else:
+        print("no improvement")
 
 
 def slim(filename: str, treewidth: int, budget: int, debug=False):
@@ -151,7 +189,9 @@ def slim(filename: str, treewidth: int, budget: int, debug=False):
 
 
 if __name__ == '__main__':
-    filename = "../past-work/blip-publish/data/child-5000.jkl"
+    # filename = "../past-work/blip-publish/data/child-5000.jkl"
+    filename = "child-norm.jkl"
+    random.seed(5)
     slim(filename, 5, BUDGET, debug=True)
     sys.exit()
     print("running blip...")
@@ -160,7 +200,6 @@ if __name__ == '__main__':
     print("done")
     start_td = start_bn.td
     # start_td.draw()
-    random.seed(9)
     selected, seen = find_subtree(start_td, debug=True)
     print("found subtree", "sel:", selected, "\tseen:", seen)
     forced_arcs, forced_cliques = prepare_subtree(start_bn, start_td, selected, seen, True)
