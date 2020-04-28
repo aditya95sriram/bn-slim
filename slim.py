@@ -4,7 +4,7 @@
 import os, sys
 import networkx as nx
 import random
-from typing import Dict
+from typing import Dict, List, Tuple
 
 # internal
 from blip import run_blip, BayesianNetwork, TWBayesianNetwork
@@ -62,18 +62,18 @@ def handle_acyclicity(bn: BayesianNetwork, seen: set, leaf_nodes: set, debug=Fal
     if debug:
         nx.draw(subdag, pygraphviz_layout(subdag), with_labels=True)
         plt.show()
-    forced_parents = {node: set() for node in leaf_nodes}
+    forced_arcs = []
     if debug: print(f"nodes leaf:{leaf_nodes}\tinner:{inner_nodes}\touter:{outer_nodes}")
     for src, dest in pairs(leaf_nodes):
         if nx.has_path(subdag, src, dest):
-            forced_parents[dest].add(src)
-            if debug: print(f"added forced {dest}<-{src}")
+            forced_arcs.append((src, dest))
+            if debug: print(f"added forced {src}->{dest}")
         else:
             # only check if prev path not found
             if nx.has_path(subdag, dest, src):
-                forced_parents[src].add(dest)
-                if debug: print(f"added forced {src}<-{dest}")
-    return forced_parents
+                forced_arcs.append(dest, src)
+                if debug: print(f"added forced {dest}->{src}")
+    return forced_arcs
 
 
 def prepare_subtree(bn: TWBayesianNetwork, bag_ids: set, seen: set, debug=False):
@@ -89,8 +89,8 @@ def prepare_subtree(bn: TWBayesianNetwork, bag_ids: set, seen: set, debug=False)
 
     # compute forced parent data for leaf nodes
     if debug: print(f"leaf bags: {leaf_bag_ids}\tleaf nodes:{leaf_nodes}")
-    forced_parents = handle_acyclicity(bn, seen, leaf_nodes, debug)
-    if debug: print("forced parents", forced_parents)
+    forced_arcs = handle_acyclicity(bn, seen, leaf_nodes, debug)
+    if debug: print("forced arcs", forced_arcs)
 
     # copy over bn data for inner nodes respecting forced parents
     # input_data = read_bn(start_bn.input_file)
@@ -106,16 +106,16 @@ def prepare_subtree(bn: TWBayesianNetwork, bag_ids: set, seen: set, debug=False)
 
     # construct forced clique edges on leaf nodes per bag
     if debug: print(f"clique sets: {forced_cliques}")
-    return forced_parents, forced_cliques
+    return forced_arcs, forced_cliques
 
 
 def get_data_for_subtree(filename: str, seen: set,
-                         forced_parents: Dict[int, set]) -> BNData:
+                         forced_arcs: List[Tuple[int, int]]) -> BNData:
     data = filter_read_bn(filename, seen)
     # new_data: BNData = dict()
     # for node, psets in data.items():
     #     new_data[node] = {pset: score for pset, score in psets.items()
-    #                       if pset.issubset(forced_parents[node])}
+    #                       if pset.issubset(forced_arcs[node])}
     return data  # todo[think]: new_data or data?
 
 
@@ -125,13 +125,13 @@ def slimpass(bn: TWBayesianNetwork, budget: int, debug=False):
     selected, seen = find_subtree(td, budget, debug=False)
     nx.draw(bn.get_dag().subgraph(seen), with_labels=True)
     plt.show()
-    forced_parents, forced_cliques = prepare_subtree(bn, selected, seen, debug=False)
-    new_data = get_data_for_subtree(bn.input_file, seen, forced_parents)
+    forced_arcs, forced_cliques = prepare_subtree(bn, selected, seen, debug=False)
+    new_data = get_data_for_subtree(bn.input_file, seen, forced_arcs)
     for node in seen:
         parents = bn.parents[node]
         print(node, parents, new_data[node][parents])
     old_score = bn.compute_score(seen)
-    replbn = solve_bn(new_data, tw, bn.input_file, forced_parents, forced_cliques)
+    replbn = solve_bn(new_data, tw, bn.input_file, forced_arcs, forced_cliques)
     new_score = replbn.compute_score()
     if debug: print(f"score change: {old_score:.3f} -> {new_score:.3f}")
     if new_score > old_score:
@@ -163,6 +163,6 @@ if __name__ == '__main__':
     random.seed(9)
     selected, seen = find_subtree(start_td, debug=True)
     print("found subtree", "sel:", selected, "\tseen:", seen)
-    forced_parents, forced_cliques = prepare_subtree(start_bn, start_td, selected, seen, True)
+    forced_arcs, forced_cliques = prepare_subtree(start_bn, start_td, selected, seen, True)
     # write_jkl(new_input, "testnew.jkl")
 

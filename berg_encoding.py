@@ -2,7 +2,7 @@
 
 # external
 import networkx as nx
-from typing import Dict, List
+from typing import Dict, List, Tuple
 import sys, os
 import subprocess
 from time import time as now
@@ -19,7 +19,7 @@ TIMEOUT = 10
 
 
 class TwbnEncoding(SvEncoding):
-    def __init__(self, data: BNData, stream, forced_parents=None,
+    def __init__(self, data: BNData, stream, forced_arcs=None,
                  forced_cliques=None, debug=False):
         dummy_graph = nx.Graph()
         dummy_graph.add_nodes_from(data.keys())
@@ -34,8 +34,8 @@ class TwbnEncoding(SvEncoding):
         self.header_template = f"p wcnf {{}} {{}} {TOP}"
 
         # slim related sat variables
-        forced_parents = dict() if forced_parents is None else forced_parents
-        self.forced_parents: Dict[int, List[int]] = forced_parents
+        forced_arcs = [] if forced_arcs is None else forced_arcs
+        self.forced_arcs: List[Tuple[int, int]] = forced_arcs
         forced_cliques = [] if forced_cliques is None else forced_cliques
         self.forced_cliques: List[List[int]] = forced_cliques
 
@@ -87,8 +87,8 @@ class TwbnEncoding(SvEncoding):
             self._add_comment(f"end exactly one par for {_v}")
 
         # slim only
-        for _v in self.forced_parents:
-            for _u in self.forced_parents[_v]:
+        for _v in self.forced_arcs:
+            for _u in self.forced_arcs[_v]:
                 v, u = self.node_lookup[_v], self.node_lookup[_u]
                 # slim-clause: acyc*(u,v) for each forced directed edge u->v
                 self._add_comment(f"[slim] forced edge {_u}->{_v}")
@@ -195,11 +195,11 @@ class TwbnDecoder(object):
         return bn
 
 
-def solve_bn(data: BNData, treewidth: int, input_file: str, forced_parents=None,
+def solve_bn(data: BNData, treewidth: int, input_file: str, forced_arcs=None,
              forced_cliques=None, timeout: int = TIMEOUT, debug=False):
     cnfpath = "temp.cnf"
     with open(cnfpath, 'w') as cnffile:
-        enc = TwbnEncoding(data, cnffile, forced_parents, forced_cliques, debug)
+        enc = TwbnEncoding(data, cnffile, forced_arcs, forced_cliques, debug)
         enc.encode_sat(treewidth)
     if debug: print("encoding done")
     base_cmd = [os.path.join(SOLVER_DIR, "uwrmaxsat"), "-m", "-v0"]
