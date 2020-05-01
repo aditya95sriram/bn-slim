@@ -2,21 +2,21 @@
 
 # external
 import networkx as nx
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, FrozenSet
 import sys, os
 import subprocess
 from time import time as now
 
 # internal
 from samer_veith import SvEncoding, SelfNamingDict
-from utils import num_nodes_bn, read_bn, read_model, BNData
-from utils import pairs, ord_triples, posdict_to_ordering
+from utils import num_nodes_bn, read_bn, read_model, BNData, TreeDecomposition
+from utils import pairs, ord_triples, posdict_to_ordering, check_subgraph
 from blip import TWBayesianNetwork
 
 TOP = int(1e15)  # todo: make dynamic
 SOLVER_DIR = "../solvers"
 TIMEOUT = 10
-
+ROUNDING = 1
 
 class TwbnEncoding(SvEncoding):
     def __init__(self, data: BNData, stream, forced_arcs=None,
@@ -36,8 +36,9 @@ class TwbnEncoding(SvEncoding):
         # slim related sat variables
         forced_arcs = [] if forced_arcs is None else forced_arcs
         self.forced_arcs: List[Tuple[int, int]] = forced_arcs
-        forced_cliques = [] if forced_cliques is None else forced_cliques
-        self.forced_cliques: List[List[int]] = forced_cliques
+        forced_cliques = dict() if forced_cliques is None else forced_cliques
+        self.forced_cliques: Dict[int, FrozenSet[int]] = forced_cliques
+        self.rounding: int = ROUNDING
 
     def _add_clause(self, *args, weight=TOP):
         # use TOP if no weight specified (hard clauses)
@@ -73,7 +74,7 @@ class TwbnEncoding(SvEncoding):
             for p, score in data[_v].items():
                 # clause: par(v,p) weighted by f(v,p)
                 self._add_comment(f"soft clause par({_v}, {set(p)}), wt: {score:.2f}")
-                self._add_clause(self.par[v][p], weight=int(score))
+                self._add_clause(self.par[v][p], weight=self.rounding*int(score/self.rounding))
 
                 for _u in p:
                     u = self.node_lookup[_u]
@@ -87,12 +88,11 @@ class TwbnEncoding(SvEncoding):
             self._add_comment(f"end exactly one par for {_v}")
 
         # slim only
-        for _v in self.forced_arcs:
-            for _u in self.forced_arcs[_v]:
-                v, u = self.node_lookup[_v], self.node_lookup[_u]
-                # slim-clause: acyc*(u,v) for each forced directed edge u->v
-                self._add_comment(f"[slim] forced edge {_u}->{_v}")
-                self._add_clause(self._acyc(u, v))
+        for _v, _u in self.forced_arcs:
+            v, u = self.node_lookup[_v], self.node_lookup[_u]
+            # slim-clause: acyc*(u,v) for each forced directed edge u->v
+            self._add_comment(f"[slim] forced edge {_u}->{_v}")
+            self._add_clause(self._acyc(u, v))
 
     def encode_tw(self):
         data = self.data
@@ -118,16 +118,25 @@ class TwbnEncoding(SvEncoding):
                 self._add_comment(f"end moralization of parent {set(p)} of {v}")
 
         # slim only
-        for bag in self.forced_cliques:
-            self._add_comment(f"begin [slim] forced clique {bag}")
+        for _, bag in self.forced_cliques.items():
+            if len(bag) <= 1: continue  # nothing to encode
+            self._add_comment(f"begin [slim] forced clique {set(bag)}")
             for _u, _v in pairs(bag):
                 u, v = self.node_lookup[_u], self.node_lookup[_v]
                 # slim-clause: ord* => arc for nodes in same boundary bag
+                self._add_comment(f"\t {_u} before {_v} implies {_u}->{_v}")
                 self._add_clause(-self._ord(u, v), self.arc[u][v])
+                self._add_comment(f"\t {_v} before {_u} implies {_v}->{_u}")
                 self._add_clause(-self._ord(v, u), self.arc[v][u])
-            self._add_comment(f"end [slim] forced clique {bag}")
+            self._add_comment(f"end [slim] forced clique {set(bag)}")
 
     def encode(self):
+        # allow at most one arc (not strictly necessary)
+        for i,j in pairs(range(self.num_nodes)):
+            _i, _j = self.node_reverse_lookup[i], self.node_reverse_lookup[j]
+            self._add_comment(f"at most one arc {_i}->{_j} or {_j}->{_i}")
+            self._add_clause(-self.arc[i][j], -self.arc[j][i])
+
         self.encode_bn()
 
         # setup graph variables for treewidth computation
@@ -174,6 +183,20 @@ class TwbnDecoder(object):
     def get_dag_order(self):
         return self._get_order(self.encoder.acyc)
 
+    def get_triangulated(self):
+        graph = nx.DiGraph()
+        elim_order = self.get_elim_order()
+        # add nodes
+        graph.add_nodes_from(elim_order)
+        # add edges
+        for _u, _v in pairs(elim_order):
+            u = self.encoder.node_lookup[_u]
+            v = self.encoder.node_lookup[_v]
+            # only consider arc if it obeys elim order
+            if self.encoder.arc[u][v] in self.model:
+                graph.add_edge(_u, _v)
+        return graph
+
     def get_parents(self):
         parents = dict()
         for v in range(self.encoder.num_nodes):
@@ -188,15 +211,17 @@ class TwbnDecoder(object):
 
     def get_bn(self):
         parents = self.get_parents()
+        tri = self.get_triangulated().to_undirected()
         elim_order = self.get_elim_order()
-        # todo: compute score and store in bn.score
-        bn = TWBayesianNetwork(self.infile, self.tw, elim_order, parents=parents)
-        bn.done()
+        td = TreeDecomposition(tri, elim_order, width=self.tw)
+        bn = TWBayesianNetwork(self.infile, self.tw, elim_order, td=td, parents=parents)
+        assert check_subgraph(tri, bn.get_triangulated()), \
+            "parent-based ordered triangulated graph is subgraph assumption failed"
         return bn
 
 
 def solve_bn(data: BNData, treewidth: int, input_file: str, forced_arcs=None,
-             forced_cliques=None, timeout: int = TIMEOUT, debug=False):
+             forced_cliques=None, timeout: int=TIMEOUT, debug=False):
     cnfpath = "temp.cnf"
     with open(cnfpath, 'w') as cnffile:
         enc = TwbnEncoding(data, cnffile, forced_arcs, forced_cliques, debug)
@@ -217,5 +242,6 @@ def solve_bn(data: BNData, treewidth: int, input_file: str, forced_arcs=None,
 
 
 if __name__ == '__main__':
-    input_file = "../past-work/blip-publish/data/child-5000.jkl"
-    bn = solve_bn(read_bn(input_file), 3, input_file)
+    input_file = "child-norm.jkl"
+    bn = solve_bn(read_bn(input_file), 5, input_file)
+    print(bn.score)

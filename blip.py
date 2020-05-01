@@ -20,9 +20,13 @@ class BayesianNetwork(object):
         self.input_file = input_file
         self.data = data
         self.sum_scores, self.offsets = get_bn_stats(self.input_file)
+        self._score = None
         self._dag = None
 
-    def compute_score(self, subset: set=None):
+    def _clear_cached(self):
+        self._score = self._dag = None
+
+    def compute_score(self, subset: set=None) -> float:
         """recompute score based on parents sets"""
         if self.data is None:
             if subset is None:
@@ -38,15 +42,22 @@ class BayesianNetwork(object):
                     score += psets[self.parents[node]] + self.offsets[node]
         return score
 
+    @property
+    def score(self) -> float:
+        if self._score is None:
+            self._score = self.compute_score()
+        return self._score
+
     def add(self, node, parents):
         self.parents[node] = frozenset(parents)
-        self._dag = None  # cached dag no longer valid
+        self._clear_cached()
 
     def recompute_dag(self):
         dag = nx.DiGraph()
         for node in self.parents.keys():
             dag.add_node(node)
             for parent in self.parents[node]:
+                assert not dag.has_edge(node, parent), f"cyclic parent set {node}<->{parent}"
                 dag.add_edge(parent, node)
         self._dag = dag
 
@@ -75,14 +86,15 @@ class BayesianNetwork(object):
     def replace(self, newbn: 'BayesianNetwork'):
         for node, new_parents in newbn.parents.items():
             self.parents[node] = new_parents
+        self._clear_cached()
 
 
 class TWBayesianNetwork(BayesianNetwork):
-    def __init__(self, input_file, tw=0, elim_order=None, *args, **kwargs):
+    def __init__(self, input_file, tw=0, elim_order=None, td=None, *args, **kwargs):
         super().__init__(input_file, *args, **kwargs)
         self.tw = tw
         self.elim_order = elim_order
-        self._td: Optional[TreeDecomposition] = None
+        self._td: Optional[TreeDecomposition] = td
 
     @property
     def td(self) -> TreeDecomposition:
@@ -131,7 +143,7 @@ def run_blip(filename, treewidth, outfile="temp.out", timeout=10, seed=0,
             for line in out:
                 if not line.strip(): continue
                 elif line.startswith("Score:"):
-                    bn.score = float(line.split()[1])
+                    continue
                 else:
                     vertex, rest = line.split(":")
                     rest = rest.strip().split()

@@ -3,7 +3,7 @@
 import networkx as nx
 import itertools
 import random
-from typing import Union, Tuple, Dict, List, Iterator, FrozenSet, TextIO
+from typing import Union, Tuple, Dict, List, Iterator, FrozenSet, TextIO, Set
 import sys, os
 from operator import itemgetter
 
@@ -193,6 +193,13 @@ def find_first_by_order(elements: set, order):
         if element in elements: return element
 
 
+def check_subgraph(graph: nx.Graph, subgraph: nx.Graph):
+    for edge in subgraph.edges:
+        if not graph.has_edge(*edge):
+            return False
+    return True
+
+
 class TreeDecomposition(object):
     def __init__(self, graph: nx.Graph, order, width=0):
         self.bags: Dict[int, frozenset] = dict()
@@ -273,41 +280,48 @@ class TreeDecomposition(object):
         nx.draw_networkx_labels(self.decomp, pos, labels=labels)
         plt.show()
 
-    def replace(self, selected, new_td: 'TreeDecomposition'):
+    def replace(self, selected, forced_cliques, new_td: 'TreeDecomposition'):
+        covered_nodes = set()  # assertion
         remap = dict()
         # add new bags
         for old_id, bag in new_td.bags.items():
             new_id = self.add_bag(bag)
             remap[old_id] = new_id
+            covered_nodes.update(bag)
         # add new edges
         for b1, b2 in new_td.decomp.edges:
             self.decomp.add_edge(remap[b1], remap[b2])
 
         # connect new bags to those outside selected
-        # todo[try]: Dict[intersection -> (in_id, out_id)]
         # todo[opt]: smart patching (avoid brute force, use elim ordering td)
-        for old_id, nbrs in self.get_boundary_intersections(selected).items():
-            for nbr_id, intersection in nbrs.items():
-                # find bag in new_td which contains intersection
-                for new_id, bag in new_td.bags.items():
-                    if intersection.issubset(bag):
-                        self.decomp.add_edge(new_id, nbr_id)
-                        break  # out of `for new_id, bag`
+        for nbr_id, intersection in forced_cliques.items():
+            # find bag in new_td which contains intersection
+            req_bag_id = new_td.bag_containing(intersection)
+            assert req_bag_id != -1,\
+                f"required bag containing {set(intersection)} not found"
+            self.decomp.add_edge(remap[req_bag_id], nbr_id)
 
+        existing_nodes = set()  # assertion
         # delete old bags which are going to be replaced
-        covered_nodes = set()
         for sel_idx in selected:
-            covered_nodes.update(self.bags[sel_idx])
+            existing_nodes.update(self.bags[sel_idx])
             del self.bags[sel_idx]
             self.decomp.remove_node(sel_idx)
 
+        assert covered_nodes == existing_nodes, \
+            f"replacement td mismatch, " \
+            f"existing: {existing_nodes}\tcovered: {covered_nodes}"
 
-    def bag_containing(self, members: Union[set, frozenset]) -> int:
+
+    def bag_containing(self, members: Union[set, frozenset],
+                       exclude: Set[int] = None) -> int:
         """
         returns the id of a bag containing given members
         if no such bag exists, returns -1
         """
+        exclude = set() if exclude is None else exclude
         for bag_id, bag in self.bags.items():
+            if bag_id in exclude: continue
             if bag.issuperset(members):
                 return bag_id
         return -1
