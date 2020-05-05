@@ -4,26 +4,31 @@
 import os, sys
 import networkx as nx
 import random
-from typing import Dict, List, Tuple, Set, FrozenSet
+from typing import Dict, List, Tuple, Set, FrozenSet, Callable
 from pprint import pprint
 from time import time as now
+import argparse
+import signal
 
 # internal
-from blip import run_blip, BayesianNetwork, TWBayesianNetwork
-from utils import TreeDecomposition, pick, pairs, filter_read_bn, BNData, stream_bn
+from blip import run_blip, BayesianNetwork, TWBayesianNetwork, monitor_blip
+from utils import TreeDecomposition, pick, pairs, filter_read_bn, BNData
 from berg_encoding import solve_bn
 
 # optional
 from networkx.drawing.nx_agraph import pygraphviz_layout
 import matplotlib.pyplot as plt
+import wandb
 
+
+# default parameter values
 BUDGET = 7
 TIMEOUT = 5
-
-
-class SubTreeDecomposition(object):
-    def __init__(self, td: TreeDecomposition, selected):
-        pass
+MAX_PASSES = 100
+MAX_TIME = 1800
+HEURISTIC = 'kmax'
+OFFSET = 2
+SEED = 9
 
 
 def find_subtree(td: TreeDecomposition, budget:int, debug=False):
@@ -39,19 +44,22 @@ def find_subtree(td: TreeDecomposition, budget:int, debug=False):
     selected = {start_bag_id}
     seen = set(td.bags[start_bag_id])
     if debug: print(f"starting bag {start_bag_id}: {td.bags[start_bag_id]}")
-    for layer, bag_ids in nx.bfs_successors(td.decomp, start_bag_id):
-        no_new_inclusion = True
-        for bag_id in bag_ids:
-            bag = td.bags[bag_id]
-            if len(seen.union(bag)) > budget:
-                continue
-            else:
-                selected.add(bag_id)
-                seen.update(bag)
-                if debug: print(f"added bag {bag_id}: {td.bags[bag_id]}")
-                no_new_inclusion = False
-        if no_new_inclusion:
-            break
+    queue = [start_bag_id]
+    visited = set()
+    while queue:
+        bag_id = queue.pop(0)
+        visited.add(bag_id)
+        bag = td.bags[bag_id]
+        if len(seen.union(bag)) > budget:
+            continue
+        else:  # can include bag in local instance
+            selected.add(bag_id)
+            seen.update(bag)
+            # add neighboring bags to queue
+            for nbr_id in td.decomp.neighbors(bag_id):
+                if nbr_id not in visited:
+                    queue.append(nbr_id)
+            if debug: print(f"added bag {bag_id}: {td.bags[bag_id]}")
     if debug: print(f"final seen: {seen}")
     return selected, seen
 
@@ -132,7 +140,8 @@ def get_data_for_subtree(bn: TWBayesianNetwork, boundary_nodes: set, seen: set) 
     return data, substitutions
 
 
-def slimpass(bn: TWBayesianNetwork, budget: int, timeout: int, debug=False):
+def slimpass(bn: TWBayesianNetwork, budget: int=BUDGET, timeout: int=TIMEOUT,
+             debug=False):
     td = bn.td
     tw = td.width
     selected, seen = find_subtree(td, budget, debug=False)
@@ -173,36 +182,121 @@ def slimpass(bn: TWBayesianNetwork, budget: int, timeout: int, debug=False):
         bn.verify()
 
 
-def slim(filename: str, treewidth: int, budget: int, timeout: int,
-         num_passes=10, debug=False):
-    bn = run_blip(filename, treewidth, timeout=2, seed=9)
+class Solution(object):
+    def __init__(self, value=None, logger: Callable=None):
+        self.value: TWBayesianNetwork = value
+        self.logger = logger
+
+    def update(self, new_value):
+        if self.logger:
+            self.logger(new_value)
+        self.value = new_value
+
+
+def slim(filename: str, treewidth: int, solution: Solution, budget: int=BUDGET,
+         sat_timeout: int=TIMEOUT, max_passes=MAX_PASSES, max_time: int=MAX_TIME,
+         heuristic=HEURISTIC, offset: int=OFFSET, seed=SEED, debug=False):
+    start = now()
+    def elapsed(): return f"(after {now()-start:.1f} s.)"
+    bn = run_blip(filename, treewidth, timeout=offset, seed=seed, solver=heuristic)
+    bn.verify()
+    solution.update(bn)
     prev_score = bn.score
     print(f"Starting score: {prev_score:.5f}")
-    start = now()
-    for i in range(num_passes):
-        slimpass(bn, budget, timeout, debug=False)
+    if seed: random.seed(seed)
+    for i in range(max_passes):
+        slimpass(bn, budget, sat_timeout, debug=False)
         new_score = bn.score
         if new_score > prev_score:
-            print(f"New improvement! {new_score:.5f} (after {now()-start:.1f} s.)")
+            print(f"*** New improvement! {new_score:.5f} {elapsed()} ***")
             prev_score = new_score
-        if debug: print(f"Iteration {i} score:\t{bn.score:.5f}\n")
-    print(f"done (after {now()-start:.1f} s.)")
+            solution.update(bn)
+        if debug: print(f"* Iteration {i}:\t{bn.score:.5f} {elapsed()}")
+        if now()-start > max_time:
+            if debug: print("time limit exceeded, quitting")
+            break
+    print(f"done {elapsed()}")
 
+
+class SolverInterrupt(BaseException): pass
+
+
+def term_handler(signum, frame):
+    print(f"#### received signal {signum}, stopping...")
+    raise SolverInterrupt
+
+
+def register_handler():
+    signums = [signal.SIGHUP, signal.SIGINT, signal.SIGTERM,
+               signal.SIGUSR1, signal.SIGUSR2]
+    for signum in signums:
+        signal.signal(signum, term_handler)
+
+
+def wandb_configure(wandb: wandb, args):
+    basename, ext = os.path.splitext(os.path.basename(args.file))
+    instance, samples = basename.split("-")
+    wandb.config.instance = instance
+    wandb.config.samples = int(samples)
+    wandb.config.treewidth = args.treewidth
+    wandb.config.budget = args.budget
+    wandb.config.sat_timeout = args.sat_timeout
+    wandb.config.heuristic = args.heuristic
+    wandb.config.seed = args.random_seed
+    wandb.config.method = 'heur' if args.compare else 'slim'
+
+
+parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+parser.add_argument("file", help="path to input file")
+parser.add_argument("treewidth", help="bound for treewidth", type=int)
+parser.add_argument("-b", "--budget", type=int, default=BUDGET,
+                    help="budget for size of local instance")
+parser.add_argument("-s", "--sat-timeout", type=int, default=TIMEOUT,
+                    help="timeout per MaxSAT call")
+parser.add_argument("-p", "--max-passes", type=int, default=MAX_PASSES,
+                    help="max number of passes of SLIM to run")
+parser.add_argument("-t", "--max-time", type=int, default=MAX_TIME,
+                    help="max time for SLIM to run")
+parser.add_argument("-u", "--heuristic", default=HEURISTIC,
+                    choices=["kg", "ka", "kmax"], help="heuristic solver to use")
+parser.add_argument("-o", "--offset", type=int, default=OFFSET,
+                    help="duration after which slim takes over")
+parser.add_argument("-c", "--compare", action="store_true",
+                    help="run only heuristic to gather stats for comparison")
+parser.add_argument("-r", "--random-seed", type=int, default=SEED,
+                    help="random seed (set 0 for no seed)")
+parser.add_argument("-l", "--logging", action="store_true", help="wandb logging")
+parser.add_argument("-v", "--verbose", action="store_true", help="verbose mode")
 
 if __name__ == '__main__':
-    # filename = "../past-work/blip-publish/data/child-5000.jkl"
-    filename = "child-norm.jkl"
-    random.seed(5)
-    slim(filename, 5, BUDGET, TIMEOUT, 25, debug=False)
-    sys.exit()
-    print("running blip...")
-    start_bn = run_blip(filename, 5, timeout=2, seed=9)
-    # start_bn.draw()
-    print("done")
-    start_td = start_bn.td
-    # start_td.draw()
-    selected, seen = find_subtree(start_td, debug=True)
-    print("found subtree", "sel:", selected, "\tseen:", seen)
-    forced_arcs, forced_cliques = prepare_subtree(start_bn, start_td, selected, seen, True)
-    # write_jkl(new_input, "testnew.jkl")
+    args = parser.parse_args()
+    filepath = os.path.abspath(args.file)
+    if args.logging:
+        wandb.init(project='twbnslim-test')
+        wandb_configure(wandb, args)
+        solution = Solution(logger=lambda bn: wandb.log({'score': bn.score}))
+    else:
+        solution = Solution()
 
+    # compare and exit if only comparison requested
+    if args.compare:
+        if args.logging:
+            logger = lambda x: wandb.log({'score': x})
+        else:
+            logger = lambda x: x
+        monitor_blip(filepath, args.treewidth, logger, timeout=args.max_time,
+                     seed=args.random_seed, solver=args.heuristic, debug=args.verbose)
+        sys.exit()
+
+    register_handler()
+    try:
+        slim(filepath, args.treewidth, solution, args.budget, args.sat_timeout,
+             args.max_passes, args.max_time, args.heuristic, args.offset,
+             args.random_seed, args.verbose)
+    except SolverInterrupt:
+        print("solver interrupted")
+    finally:
+        if solution.value is None:
+            print("no solution computed so far")
+        else:
+            print(f"final score: {solution.value.score:.5f}")
