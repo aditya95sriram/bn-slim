@@ -4,7 +4,8 @@ import subprocess
 import os
 import networkx as nx
 import random
-from typing import Optional
+from typing import Optional, Callable
+import re
 
 from utils import filled_in, TreeDecomposition, pairs, stream_bn, get_bn_stats, filter_read_bn
 
@@ -77,8 +78,11 @@ class BayesianNetwork(object):
                 moral.add_edge(p1, p2)
         return moral
 
-    def draw(self):
-        dag = self.dag
+    def draw(self, subset=None):
+        if subset is None:
+            dag = self.dag
+        else:
+            dag = self.dag.subgraph(subset)
         pos = pygraphviz_layout(dag, prog='dot')
         nx.draw(dag, pos, with_labels=True)
         plt.show()
@@ -115,7 +119,7 @@ class TWBayesianNetwork(BayesianNetwork):
 
     def verify(self):
         super().verify()
-        self.td.verify()
+        self.td.verify(graph=self.get_moralized())
 
     def get_triangulated(self, elim_order=None):
         if elim_order is None: elim_order = self.elim_order
@@ -131,7 +135,7 @@ def run_blip(filename, treewidth, outfile="temp.out", timeout=10, seed=0,
              solver="kg", logfile="temp.log", debug=False):
     basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"),
                f"solver.{solver}", "-v", "1"]
-    args = ["-j", filename, "-w", str(treewidth+1), "-r", outfile,
+    args = ["-j", filename, "-w", str(treewidth), "-r", outfile,
             "-t", str(timeout), "-seed", str(seed), "-l", logfile]
     # blip width convention is off by one (trees have width 2)
     cmd = basecmd + args
@@ -160,6 +164,27 @@ def run_blip(filename, treewidth, outfile="temp.out", timeout=10, seed=0,
     else:  # error
         print("error encountered, returncode:", proc.returncode)
         return None
+
+
+def monitor_blip(filename, treewidth, logger: Callable, outfile="temp.out",
+                 timeout=10, seed=0, solver="kg", debug=False):
+    basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"),
+               f"solver.{solver}", "-v", "1"]
+    args = ["-j", filename, "-w", str(treewidth), "-r", outfile,
+            "-t", str(timeout), "-seed", str(seed)]
+    # blip width convention is off by one (trees have width 2)
+    cmd = basecmd + args
+    if debug: print("running blip, cmd:", cmd)
+    pattern = re.compile(r"New improvement! (?P<score>[\d.-]+) \(after (?P<time>[\d.-]+) s.\)")
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=1,
+                          universal_newlines=True) as proc:
+        for line in proc.stdout:
+            if debug: print("got line:", line, end='')
+            match = pattern.match(line)
+            if match:
+                score = float(match['score'])
+                logger(score)
+    print(f"done returncode: {proc.returncode}")
 
 
 if __name__ == '__main__':

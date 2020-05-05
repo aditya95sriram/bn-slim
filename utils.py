@@ -244,7 +244,8 @@ class TreeDecomposition(object):
             blame[u] = bag_idx
         self.verify()
 
-    def verify(self):
+    def verify(self, graph: nx.Graph=None):
+        if graph is None: graph = self.graph
         # check if tree
         assert nx.is_tree(self.decomp), "decomp is not a tree"
         # check width
@@ -252,13 +253,13 @@ class TreeDecomposition(object):
         assert max_bag_size <= self.width + 1, \
             f"decomp width too high ({max_bag_size} > {self.width + 1})"
         # check vertex connected subtree
-        for node in self.graph.nodes:
+        for node in graph.nodes:
             bags_containing = [bag_id for bag_id in self.bags
                                if node in self.bags[bag_id]]
             assert nx.is_connected(self.decomp.subgraph(bags_containing)), \
                 f"subtree for vertex {node} is not connected"
         # check if every edge covered
-        for edge in self.graph.edges:
+        for edge in graph.edges:
             for bag in self.bags.values():
                 if bag.issuperset(edge):
                     break
@@ -273,11 +274,16 @@ class TreeDecomposition(object):
             intersections[bag_id][nbr_id] = self.bags[bag_id] & self.bags[nbr_id]
         return intersections
 
-    def draw(self):
-        labels = {bag_idx: f"{bag_idx}{list(bag)}" for (bag_idx, bag) in self.bags.items()}
-        pos = graphviz_layout(self.decomp, prog='dot', root=0)
-        nx.draw(self.decomp, pos)
-        nx.draw_networkx_labels(self.decomp, pos, labels=labels)
+    def draw(self, subset=None):
+        if subset is None:
+            decomp = self.decomp
+        else:
+            decomp = self.decomp.subgraph(subset)
+        pos = graphviz_layout(decomp, prog='dot')
+        labels = {bag_idx: f"{bag_idx}{list(bag)}"
+                  for (bag_idx, bag) in self.bags.items() if bag_idx in pos}
+        nx.draw(decomp, pos)
+        nx.draw_networkx_labels(decomp, pos, labels=labels)
         plt.show()
 
     def replace(self, selected, forced_cliques, new_td: 'TreeDecomposition'):
