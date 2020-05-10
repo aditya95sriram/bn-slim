@@ -20,7 +20,8 @@ class BayesianNetwork(object):
         self.parents = dict() if parents is None else parents
         self.input_file = input_file
         self.data = data
-        self.sum_scores, self.offsets = get_bn_stats(self.input_file)
+        self.sum_scores, self.best_score, self.offsets = get_bn_stats(self.input_file)
+        self.best_norm_score = self.best_score - sum(self.offsets.values())
         self._score = None
         self._dag = None
 
@@ -131,7 +132,7 @@ class TWBayesianNetwork(BayesianNetwork):
         return triangulated
 
 
-def run_blip(filename, treewidth, outfile="temp.out", timeout=10, seed=0,
+def run_blip(filename, treewidth, outfile="temp.res", timeout=10, seed=0,
              solver="kg", logfile="temp.log", debug=False):
     basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"),
                f"solver.{solver}", "-v", "1"]
@@ -148,6 +149,10 @@ def run_blip(filename, treewidth, outfile="temp.out", timeout=10, seed=0,
                 if not line.strip(): continue
                 elif line.startswith("Score:"):
                     continue
+                if line.startswith("elim-order:"):
+                    elim_order = line.split()[1].strip("()").split(",")
+                    bn.elim_order = list(map(int, elim_order))
+                    if debug: print("elim-order:", bn.elim_order)
                 else:
                     vertex, rest = line.split(":")
                     rest = rest.strip().split()
@@ -166,7 +171,7 @@ def run_blip(filename, treewidth, outfile="temp.out", timeout=10, seed=0,
         return None
 
 
-def monitor_blip(filename, treewidth, logger: Callable, outfile="temp.out",
+def monitor_blip(filename, treewidth, logger: Callable, outfile="temp.res",
                  timeout=10, seed=0, solver="kg", debug=False):
     basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"),
                f"solver.{solver}", "-v", "1"]
@@ -183,7 +188,7 @@ def monitor_blip(filename, treewidth, logger: Callable, outfile="temp.out",
             match = pattern.match(line)
             if match:
                 score = float(match['score'])
-                logger(score)
+                logger({"score": score})
     print(f"done returncode: {proc.returncode}")
 
 

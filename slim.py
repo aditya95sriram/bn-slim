@@ -9,6 +9,7 @@ from pprint import pprint
 from time import time as now
 import argparse
 import signal
+from collections import Counter
 
 # internal
 from blip import run_blip, BayesianNetwork, TWBayesianNetwork, monitor_blip
@@ -16,9 +17,13 @@ from utils import TreeDecomposition, pick, pairs, filter_read_bn, BNData
 from berg_encoding import solve_bn
 
 # optional
-from networkx.drawing.nx_agraph import pygraphviz_layout
-import matplotlib.pyplot as plt
 import wandb
+
+# check if drawing/plotting is available
+CLUSTER = os.environ["WANDB_PLATFORM"] == "cluster"
+if not CLUSTER:
+    from networkx.drawing.nx_agraph import pygraphviz_layout
+    import matplotlib.pyplot as plt
 
 
 # default parameter values
@@ -29,18 +34,25 @@ MAX_TIME = 1800
 HEURISTIC = 'kmax'
 OFFSET = 2
 SEED = 9
+LAZY_THRESHOLD = 0.0
 
 
-def find_subtree(td: TreeDecomposition, budget:int, debug=False):
+def find_start_bag(td: TreeDecomposition, history: Counter=None, debug=False):
+    return pick(td.bags.keys())  # randomly pick a bag
+
+
+def find_subtree(td: TreeDecomposition, budget:int, history: Counter=None,
+                 debug=False):
     """
     finds a subtree that fits within the budget
 
     :param td: tree decomposition in which to find the subtree
     :param budget: max number of vertices allowed in the union of selected bags
+    :param history: tally of bags picked in previous iterations
     :param debug: debug mode
     :return: (selected_bag_ids, seen_vertices)
     """
-    start_bag_id = pick(td.bags.keys())
+    start_bag_id = find_start_bag(td, history, debug)
     selected = {start_bag_id}
     seen = set(td.bags[start_bag_id])
     if debug: print(f"starting bag {start_bag_id}: {td.bags[start_bag_id]}")
@@ -88,7 +100,7 @@ def prepare_subtree(bn: TWBayesianNetwork, bag_ids: set, seen: set, debug=False)
     # compute leaf nodes (based on intersection of leaf bags with outside)
     boundary_nodes = set()
     forced_cliques: Dict[int, frozenset] = dict()
-    for bag_id, nbrs in bn.td.get_boundary_intersections(bag_ids).items():
+    for _, nbrs in bn.td.get_boundary_intersections(bag_ids).items():
         for nbr_id, intersection in nbrs.items():
             boundary_nodes.update(intersection)
             forced_cliques[nbr_id] = intersection
@@ -140,26 +152,73 @@ def get_data_for_subtree(bn: TWBayesianNetwork, boundary_nodes: set, seen: set) 
     return data, substitutions
 
 
+def compute_max_score(data: BNData, bn: BayesianNetwork) -> float:
+    max_score = 0
+    for node in data:
+        max_score += max(data[node].values()) + bn.offsets[node]
+    return max_score
+
+
+class Solution(object):
+    def __init__(self, value=None, logger: Callable=None):
+        self.value: TWBayesianNetwork = value
+        self.logger = logger
+        # other metrics to track
+        self.start_score = 0
+        self.num_passes = 0
+        self.num_improvements = 0
+        self.skipped = 0
+
+    def update(self, new_value):
+        if self.logger is not None:
+            self.logger({'score': new_value.score})
+        self.value = new_value
+
+    def log_potential(self, old, new, max, offset, best):
+        if CLUSTER: return
+        old = (old - offset)/best
+        new = (new - offset)/best
+        max = (max - offset)/best
+        with open("potentials.csv", "a") as f:
+            f.write(f"{old:.5f},{new:.5f},{max:.5f}\n")
+
+
+SOLUTION = Solution()  # placeholder global solution variable
+
+
 def slimpass(bn: TWBayesianNetwork, budget: int=BUDGET, timeout: int=TIMEOUT,
-             debug=False):
+             history: Counter=None, debug=False):
     td = bn.td
     tw = td.width
-    selected, seen = find_subtree(td, budget, debug=False)
+    selected, seen = find_subtree(td, budget, history, debug=False)
     forced_arcs, forced_cliques, data, subs = prepare_subtree(bn, selected, seen, debug)
-    if debug:
-        print("filtered data:-")
-        pprint(data)
+    # if debug:
+    #     print("filtered data:-")
+    #     pprint(data)
     old_score = bn.compute_score(seen)
-    pos = pygraphviz_layout(bn.dag, prog='dot')
-    if debug:
+    max_score = compute_max_score(data, bn)
+    if max_score < old_score:
+        print("#"*80)
+        print("found culprit")
+        sys.exit()
+    cur_offset = sum(bn.offsets[node] for node in seen)
+    if debug: print(f"potential max: {(max_score - cur_offset)/bn.best_norm_score:.5f}", end="")
+    if (max_score - cur_offset)/bn.best_norm_score <= LAZY_THRESHOLD:
+        if debug: print(" skipping ####")
+        SOLUTION.skipped += 1
+        return
+    print()
+    if not CLUSTER and debug:
+        pos = pygraphviz_layout(bn.dag, prog='dot')
         nx.draw(bn.dag, pos, with_labels=True)
         plt.suptitle("entire dag")
         plt.show()
-        print("old parents:-")
-        pprint({node: par for node, par in bn.parents.items() if node in seen})
         nx.draw(bn.dag.subgraph(seen), pos, with_labels=True)
         plt.suptitle("subdag before improvement")
         plt.show()
+    if debug:
+        print("old parents:-")
+        pprint({node: par for node, par in bn.parents.items() if node in seen})
     replbn = solve_bn(data, tw, bn.input_file, forced_arcs, forced_cliques, timeout, debug)
     # perform substitutions
     for node, pset in replbn.parents.items():
@@ -168,49 +227,50 @@ def slimpass(bn: TWBayesianNetwork, budget: int=BUDGET, timeout: int=TIMEOUT,
             replbn.parents[node] = subs[node][pset]
     replbn.recompute_dag()
     new_score = replbn.compute_score()
-    if debug:
-        print("new parents:-")
-        pprint(replbn.parents)
+    SOLUTION.log_potential(old_score, new_score, max_score, cur_offset, bn.best_norm_score)
+    recorded, potential = new_score-old_score, max_score-old_score
+    if potential == 0:
+        if debug: print("already at potential")
+    else:
+        if debug: print(f"percentage potential matched: {recorded/potential:.2%}")
+    if not CLUSTER and debug:
         nx.draw(replbn.dag, pos, with_labels=True)
         plt.suptitle("replacement subdag")
         plt.show()
+    if debug:
+        print("new parents:-")
+        pprint(replbn.parents)
     if debug: print(f"score change: {old_score:.3f} -> {new_score:.3f}")
+    SOLUTION.num_passes += 1
     if new_score >= old_score:  # replacement condition
+        SOLUTION.num_improvements += 1
         td.replace(selected, forced_cliques, replbn.td)
         # update bn with new bn
         bn.replace(replbn)
         bn.verify()
 
 
-class Solution(object):
-    def __init__(self, value=None, logger: Callable=None):
-        self.value: TWBayesianNetwork = value
-        self.logger = logger
-
-    def update(self, new_value):
-        if self.logger:
-            self.logger(new_value)
-        self.value = new_value
-
-
-def slim(filename: str, treewidth: int, solution: Solution, budget: int=BUDGET,
+def slim(filename: str, treewidth: int, budget: int=BUDGET,
          sat_timeout: int=TIMEOUT, max_passes=MAX_PASSES, max_time: int=MAX_TIME,
          heuristic=HEURISTIC, offset: int=OFFSET, seed=SEED, debug=False):
     start = now()
     def elapsed(): return f"(after {now()-start:.1f} s.)"
+    if debug: print(f"running initial heuristic for {offset}s")
     bn = run_blip(filename, treewidth, timeout=offset, seed=seed, solver=heuristic)
     bn.verify()
-    solution.update(bn)
+    SOLUTION.update(bn)
     prev_score = bn.score
     print(f"Starting score: {prev_score:.5f}")
+    SOLUTION.start_score = prev_score
+    history = Counter()
     if seed: random.seed(seed)
     for i in range(max_passes):
-        slimpass(bn, budget, sat_timeout, debug=False)
+        slimpass(bn, budget, sat_timeout, history, debug=False)
         new_score = bn.score
         if new_score > prev_score:
             print(f"*** New improvement! {new_score:.5f} {elapsed()} ***")
             prev_score = new_score
-            solution.update(bn)
+            SOLUTION.update(bn)
         if debug: print(f"* Iteration {i}:\t{bn.score:.5f} {elapsed()}")
         if now()-start > max_time:
             if debug: print("time limit exceeded, quitting")
@@ -242,6 +302,8 @@ def wandb_configure(wandb: wandb, args):
     wandb.config.budget = args.budget
     wandb.config.sat_timeout = args.sat_timeout
     wandb.config.heuristic = args.heuristic
+    wandb.config.offset = args.offset
+    wandb.config.threshold = args.lazy_threshold
     wandb.config.seed = args.random_seed
     wandb.config.method = 'heur' if args.compare else 'slim'
 
@@ -263,6 +325,8 @@ parser.add_argument("-o", "--offset", type=int, default=OFFSET,
                     help="duration after which slim takes over")
 parser.add_argument("-c", "--compare", action="store_true",
                     help="run only heuristic to gather stats for comparison")
+parser.add_argument("-z", "--lazy-threshold", type=float, default=LAZY_THRESHOLD,
+                    help="threshold below which to not try to improve local instances")
 parser.add_argument("-r", "--random-seed", type=int, default=SEED,
                     help="random seed (set 0 for no seed)")
 parser.add_argument("-l", "--logging", action="store_true", help="wandb logging")
@@ -271,17 +335,18 @@ parser.add_argument("-v", "--verbose", action="store_true", help="verbose mode")
 if __name__ == '__main__':
     args = parser.parse_args()
     filepath = os.path.abspath(args.file)
+    LAZY_THRESHOLD = args.lazy_threshold
     if args.logging:
         wandb.init(project='twbnslim-test')
         wandb_configure(wandb, args)
-        solution = Solution(logger=lambda bn: wandb.log({'score': bn.score}))
+        SOLUTION = Solution(logger=wandb.log)
     else:
-        solution = Solution()
+        SOLUTION = Solution()
 
     # compare and exit if only comparison requested
     if args.compare:
         if args.logging:
-            logger = lambda x: wandb.log({'score': x})
+            logger = wandb.log
         else:
             logger = lambda x: x
         monitor_blip(filepath, args.treewidth, logger, timeout=args.max_time,
@@ -290,13 +355,23 @@ if __name__ == '__main__':
 
     register_handler()
     try:
-        slim(filepath, args.treewidth, solution, args.budget, args.sat_timeout,
+        slim(filepath, args.treewidth, args.budget, args.sat_timeout,
              args.max_passes, args.max_time, args.heuristic, args.offset,
              args.random_seed, args.verbose)
     except SolverInterrupt:
         print("solver interrupted")
     finally:
-        if solution.value is None:
+        if SOLUTION.value is None:
             print("no solution computed so far")
         else:
-            print(f"final score: {solution.value.score:.5f}")
+            metrics = {"start_score": SOLUTION.start_score,
+                       "num_passes": SOLUTION.num_passes,
+                       "num_improvements": SOLUTION.num_improvements,
+                       "success_rate": SOLUTION.num_improvements/SOLUTION.num_passes,
+                       "skipped": SOLUTION.skipped}
+            if args.logging:
+                wandb.log(metrics)
+            else:
+                print("final metrics:")
+                pprint(metrics)
+                print(f"final score: {SOLUTION.value.score:.5f}")

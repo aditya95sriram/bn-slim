@@ -145,19 +145,21 @@ def filter_read_bn(filename: str, filterset, normalize=True) -> BNData:
     return dict(filter_stream_bn(filename, filterset, normalize))
 
 
-def get_bn_stats(filename: str) -> Tuple[float, Dict[int, float]]:
+def get_bn_stats(filename: str) -> Tuple[float, float, Dict[int, float]]:
     """
     returns sum of all scores and node-wise offsets used for normalizing
     :param filename:
     :return:  (sum_score, Dict[node, min_score])
     """
     sum_score = 0
+    best_score = 0
     offsets = dict()
     for node, psets in stream_bn(filename, normalize=False):
         scores = psets.values()
         sum_score += sum(scores)
+        best_score += max(scores)
         offsets[node] = min(scores)
-    return sum_score, offsets
+    return sum_score, best_score, offsets
 
 
 def read_model(output: Union[str, TextIO]) -> set:
@@ -198,6 +200,22 @@ def check_subgraph(graph: nx.Graph, subgraph: nx.Graph):
         if not graph.has_edge(*edge):
             return False
     return True
+
+
+def topsort(graph: nx.DiGraph, seed=None):
+    #todo: complete
+    rng = random.Random(seed)
+    graph = graph.copy()
+    sources = [v for v in graph if graph.in_degree(v) == 0]
+    while graph:
+        index = rng.randint(0, len(sources)-1)
+        chosen = sources[index]
+        yield chosen
+        del sources[index]
+        for nbr in graph.successors(chosen):
+            if graph.in_degree(nbr) == 1:
+                sources.append(nbr)
+        graph.remove_node(chosen)
 
 
 class TreeDecomposition(object):
