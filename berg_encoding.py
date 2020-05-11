@@ -91,8 +91,8 @@ class TwbnEncoding(SvEncoding):
         for _v, _u in self.forced_arcs:
             v, u = self.node_lookup[_v], self.node_lookup[_u]
             # slim-clause: acyc*(u,v) for each forced directed edge u->v
-            self._add_comment(f"[slim] forced edge {_u}->{_v}")
-            self._add_clause(self._acyc(u, v))
+            self._add_comment(f"[slim] forced edge {_v}->{_u}")
+            self._add_clause(self._acyc(v, u))
 
     def encode_tw(self):
         data = self.data
