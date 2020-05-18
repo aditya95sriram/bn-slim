@@ -162,13 +162,22 @@ def get_bn_stats(filename: str) -> Tuple[float, float, Dict[int, float]]:
     return sum_score, best_score, offsets
 
 
+class NoSolutionException(BaseException): pass
+
+
 def read_model(output: Union[str, TextIO]) -> set:
     if isinstance(output, str):
         output = output.split("\n")
     for line in output:
         if line.startswith("v"):
             return set(map(int, line.split()[1:]))
-    raise ValueError("model not found (no line starting with 'v')")
+    # if model found, this line should not be reached
+    if isinstance(output, TextIO): output.seek(0)
+    with open("err-output.log", 'w') as err_out:
+        for line in output:
+            err_out.write(line)
+    raise NoSolutionException("model not found (no line starting with 'v'\n\t"
+                              "output written to err-output.log")
 
 def read_model_from_file(filename: str) -> set:
     with open(filename) as out:

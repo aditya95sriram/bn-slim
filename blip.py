@@ -125,11 +125,37 @@ class TWBayesianNetwork(BayesianNetwork):
     def get_triangulated(self, elim_order=None):
         if elim_order is None: elim_order = self.elim_order
         assert elim_order is not None, "elim order not specified"
-        triangulated, max_degree = filled_in(self.get_moralized(), self.elim_order)
-        _, max_degree2 = filled_in(self.get_moralized(), self.elim_order[::-1])
-        # print("tw", self.tw, "max degrees", max_degree, max_degree2)
-        assert max_degree <= self.tw, "rev top order failed"
+        moral = self.get_moralized().subgraph(elim_order)
+        triangulated, max_degree = filled_in(moral, elim_order)
+        assert max_degree <= self.tw, f"tw {self.tw} < {max_degree} for elim order {elim_order}"
         return triangulated
+
+
+def parse_res(filename, treewidth, outfile, debug=False):
+    bn = TWBayesianNetwork(tw=treewidth, input_file=filename)
+    with open(outfile) as out:
+        for line in out:
+            if not line.strip():
+                continue
+            elif line.startswith("Score:"):
+                continue
+            if line.startswith("elim-order:"):
+                elim_order = line.split()[1].strip("()").split(",")
+                bn.elim_order = list(map(int, elim_order))
+                if debug: print("elim-order:", bn.elim_order)
+            else:
+                vertex, rest = line.split(":")
+                rest = rest.strip().split()
+                if len(rest) == 1:
+                    local_score = float(rest[0])
+                    parents = []
+                else:
+                    local_score, parents = rest
+                    parents = parents.strip("()").split(",")
+                bn.add(int(vertex), map(int, parents))
+                if debug: print(f"v:{vertex}, sc:{local_score}, par:{parents})")
+    bn.done()
+    return bn
 
 
 def run_blip(filename, treewidth, outfile="temp.res", timeout=10, seed=0,
@@ -143,29 +169,7 @@ def run_blip(filename, treewidth, outfile="temp.res", timeout=10, seed=0,
     if debug: print("running blip, cmd:", cmd)
     proc = subprocess.run(cmd, stdout=subprocess.PIPE)
     if proc.returncode == 0:  # success
-        bn = TWBayesianNetwork(tw=treewidth, input_file=filename)
-        with open(outfile) as out:
-            for line in out:
-                if not line.strip(): continue
-                elif line.startswith("Score:"):
-                    continue
-                if line.startswith("elim-order:"):
-                    elim_order = line.split()[1].strip("()").split(",")
-                    bn.elim_order = list(map(int, elim_order))
-                    if debug: print("elim-order:", bn.elim_order)
-                else:
-                    vertex, rest = line.split(":")
-                    rest = rest.strip().split()
-                    if len(rest) == 1:
-                        local_score = float(rest[0])
-                        parents = []
-                    else:
-                        local_score, parents = rest
-                        parents = parents.strip("()").split(",")
-                    bn.add(int(vertex), map(int, parents))
-                    if debug: print(f"v:{vertex}, sc:{local_score}, par:{parents})")
-        bn.done()
-        return bn
+        return parse_res(filename, treewidth, outfile, debug)
     else:  # error
         print("error encountered, returncode:", proc.returncode)
         return None

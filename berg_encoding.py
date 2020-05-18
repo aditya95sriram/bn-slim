@@ -2,10 +2,11 @@
 
 # external
 import networkx as nx
-from typing import Dict, List, Tuple, FrozenSet
+from typing import Dict, List, Tuple, FrozenSet, Set
 import sys, os
 import subprocess
 from time import time as now
+import shutil
 
 # internal
 from samer_veith import SvEncoding, SelfNamingDict
@@ -18,9 +19,13 @@ SOLVER_DIR = "../solvers"
 TIMEOUT = 10
 ROUNDING = 1
 
+# todo[design]: decide data structure
+#  maybe Dict[node, Dict[green parent g1, List[red verts upstream from g1]]]
+PSET_ACYC = Dict[Tuple[int, FrozenSet[int]], Set[int]]
+
 class TwbnEncoding(SvEncoding):
     def __init__(self, data: BNData, stream, forced_arcs=None,
-                 forced_cliques=None, debug=False):
+                 forced_cliques=None, pset_acyc=None, debug=False):
         dummy_graph = nx.Graph()
         dummy_graph.add_nodes_from(data.keys())
         super().__init__(stream, dummy_graph)
@@ -38,6 +43,8 @@ class TwbnEncoding(SvEncoding):
         self.forced_arcs: List[Tuple[int, int]] = forced_arcs
         forced_cliques = dict() if forced_cliques is None else forced_cliques
         self.forced_cliques: Dict[int, FrozenSet[int]] = forced_cliques
+        pset_acyc = dict() if pset_acyc is None else pset_acyc
+        self.pset_acyc: PSET_ACYC = pset_acyc
         self.rounding: int = ROUNDING
 
     def _add_clause(self, *args, weight=TOP):
@@ -74,10 +81,15 @@ class TwbnEncoding(SvEncoding):
             for p, score in data[_v].items():
                 # clause: par(v,p) weighted by f(v,p)
                 self._add_comment(f"soft clause par({_v}, {set(p)}), wt: {score:.2f}")
-                self._add_clause(self.par[v][p], weight=self.rounding*int(score/self.rounding))
+                weight = self.rounding * int(score / self.rounding)
+                if len(p) != 0 and weight == 0:  # causes floating point exception in solver
+                    self._add_comment(f"skipping, because non-trivial parent with weight 0")
+                    continue
+                self._add_clause(self.par[v][p], weight=weight)
 
                 for _u in p:
-                    u = self.node_lookup[_u]
+                    u = self.node_lookup.get(_u)
+                    if u is None: continue  # external vertex, ignore
                     # clause: par(v,p) => acyc*(u,v) for each u in p, p in Pf(v)
                     self._add_comment(f"par({_v}, {set(p)}) => acyc*({_u},{_v})")
                     self._add_clause(-self.par[v][p], self._acyc(u,v))
@@ -91,8 +103,16 @@ class TwbnEncoding(SvEncoding):
         for _v, _u in self.forced_arcs:
             v, u = self.node_lookup[_v], self.node_lookup[_u]
             # slim-clause: acyc*(u,v) for each forced directed edge u->v
-            self._add_comment(f"[slim] forced edge {_v}->{_u}")
+            self._add_comment(f"[slim] forced acyc {_v}->{_u}")
             self._add_clause(self._acyc(v, u))
+
+        # external parent set compelled acyc ordering
+        for (_v, p), acyc_predecessors in self.pset_acyc.items():
+            v = self.node_lookup[_v]
+            for _u in acyc_predecessors:
+                u = self.node_lookup[_u]
+                self._add_comment(f"[slim] forced acyc par({_v}, {set(p)}) => acyc*({_u},{_v})")
+                self._add_clause(-self.par[v][p], self._acyc(u, v))
 
     def encode_tw(self):
         data = self.data
@@ -100,7 +120,8 @@ class TwbnEncoding(SvEncoding):
             v = self.node_lookup[_v]
             for p, score in data[_v].items():
                 for _u in p:
-                    u = self.node_lookup[_u]
+                    u = self.node_lookup.get(_u)
+                    if u is None: continue  # external vertex, ignore
                     # clause: if par and ord then arc
                     self._add_comment(f"par({_v}, {set(p)}) and ord*({_u},{_v}) => arc({_u},{_v})")
                     self._add_clause(-self.par[v][p], -self._ord(u, v), self.arc[u][v])
@@ -109,7 +130,8 @@ class TwbnEncoding(SvEncoding):
 
                 self._add_comment(f"begin moralization of parent {set(p)} of {v}")
                 for _u, _w in pairs(p):
-                    u, w = self.node_lookup[_u], self.node_lookup[_w]
+                    u, w = self.node_lookup.get(_u), self.node_lookup.get(_w)
+                    if u is None or w is None: continue  # external vertices, ignore
                     # clause: moralization (arc between common parents)
                     self._add_comment(f"par({_v}, {set(p)} and ord*({_u},{_w}) => arc({_u},{_w})")
                     self._add_clause(-self.par[v][p], -self._ord(u, w), self.arc[u][w])
@@ -215,26 +237,39 @@ class TwbnDecoder(object):
         elim_order = self.get_elim_order()
         td = TreeDecomposition(tri, elim_order, width=self.tw)
         bn = TWBayesianNetwork(self.infile, self.tw, elim_order, td=td, parents=parents)
-        assert check_subgraph(tri, bn.get_triangulated()), \
+        assert check_subgraph(tri, bn.get_triangulated().subgraph(elim_order)), \
             "parent-based ordered triangulated graph is subgraph assumption failed"
         return bn
 
 
 def solve_bn(data: BNData, treewidth: int, input_file: str, forced_arcs=None,
-             forced_cliques=None, timeout: int=TIMEOUT, debug=False):
+             forced_cliques=None, pset_acyc=None, timeout: int = TIMEOUT, debug=False):
     cnfpath = "temp.cnf"
     with open(cnfpath, 'w') as cnffile:
-        enc = TwbnEncoding(data, cnffile, forced_arcs, forced_cliques, debug)
+        enc = TwbnEncoding(data, cnffile, forced_arcs, forced_cliques,
+                           pset_acyc, debug)
         enc.encode_sat(treewidth)
     if debug: print("encoding done")
     base_cmd = [os.path.join(SOLVER_DIR, "uwrmaxsat"), "-m", "-v0"]
     cmd = base_cmd + [cnfpath, f"-cpu-lim={timeout}"]
     start = now()
     try:
-        output = subprocess.check_output(cmd, universal_newlines=True)
+        output = subprocess.check_output(cmd, universal_newlines=True,
+                                         stderr=subprocess.STDOUT)
     except subprocess.CalledProcessError as err:
-        raise RuntimeError(f"error while running uwrmaxsat, rc: {err.returncode}")
-    else:
+        # copy over problematic cnf file
+        errcnf = "error.cnf"
+        shutil.copy(cnfpath, errcnf)
+        if err.stdout is not None:
+            errfilename = "uwrmaxsat-err.log"
+            with open(errfilename, 'w') as errfile:
+                errfile.write(err.stdout)
+                raise RuntimeError(f"error while running uwrmaxsat on {errcnf}"
+                                   f"\nrc: {err.returncode}, check {errfilename}")
+        else:
+            raise RuntimeError(f"error while running uwrmaxsat on {errcnf}"
+                               f"\nrc: {err.returncode}, no stdout captured")
+    else:  # if no error while maxsat solving
         runtime = now() - start
         model = read_model(output)
         dec = TwbnDecoder(enc, treewidth, model, input_file)

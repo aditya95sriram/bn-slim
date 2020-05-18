@@ -13,9 +13,9 @@ import signal
 from collections import Counter
 
 # internal
-from blip import run_blip, BayesianNetwork, TWBayesianNetwork, monitor_blip
-from utils import TreeDecomposition, pick, pairs, filter_read_bn, BNData
-from berg_encoding import solve_bn
+from blip import run_blip, BayesianNetwork, TWBayesianNetwork, monitor_blip, parse_res
+from utils import TreeDecomposition, pick, pairs, filter_read_bn, BNData, NoSolutionException
+from berg_encoding import solve_bn, PSET_ACYC
 
 # optional
 import wandb
@@ -26,6 +26,8 @@ if not CLUSTER:
     from networkx.drawing.nx_agraph import pygraphviz_layout
     import matplotlib.pyplot as plt
 
+# score comparison epsilon
+EPSILON = 1e-10
 
 # default parameter values
 BUDGET = 7
@@ -36,6 +38,7 @@ HEURISTIC = 'kmax'
 OFFSET = 2
 SEED = 9
 LAZY_THRESHOLD = 0.0
+START_WITH = None
 RELAXED_PARENTS = False
 
 
@@ -82,17 +85,17 @@ def handle_acyclicity(bn: BayesianNetwork, seen: set, leaf_nodes: set, debug=Fal
     dag = bn.dag
     subdag = nx.subgraph_view(dag, lambda x: True,
                               lambda x, y: not ((x in seen) and (y in seen)))
-    forced_arc_dict = {node: set() for node in leaf_nodes}
+    forced_arcs = []
     for src, dest in pairs(leaf_nodes):
         if nx.has_path(subdag, src, dest):
-            forced_arc_dict[src].add(dest)
+            forced_arcs.append((src, dest))
             if debug: print(f"added forced {src}->{dest}")
         else:
             # only check if prev path not found
             if nx.has_path(subdag, dest, src):
-                forced_arc_dict[dest].add(src)
+                forced_arcs.append((dest, src))
                 if debug: print(f"added forced {dest}->{src}")
-    return forced_arc_dict
+    return forced_arcs
 
 
 def prepare_subtree(bn: TWBayesianNetwork, bag_ids: set, seen: set, debug=False):
@@ -107,43 +110,39 @@ def prepare_subtree(bn: TWBayesianNetwork, bag_ids: set, seen: set, debug=False)
 
     # compute forced arc data for leaf nodes
     if debug: print("boundary nodes:", boundary_nodes)
-    forced_arc_dict = handle_acyclicity(bn, seen, boundary_nodes, debug)
-    if debug: print("forced arcs", forced_arc_dict)
+    forced_arcs = handle_acyclicity(bn, seen, boundary_nodes, debug)
+    if debug: print("forced arcs", forced_arcs)
 
-    data, substitutions = get_data_for_subtree(bn, boundary_nodes, seen, forced_arc_dict)
+    data, pset_acyc = get_data_for_subtree(bn, boundary_nodes, seen, forced_arcs)
 
-    forced_arcs = []
-    for node, downset in forced_arc_dict.items():
-        forced_arcs.extend((node, down) for down in downset)
-    return forced_arcs, forced_cliques, data, substitutions
+    return forced_arcs, forced_cliques, data, pset_acyc
 
 
 def get_data_for_subtree(bn: TWBayesianNetwork, boundary_nodes: set, seen: set,
-                         forced_arc_dict: Dict[int, set]) \
-        -> Tuple[BNData, Dict[int, Dict[frozenset, frozenset]]]:
+                         forced_arcs: List[Tuple[int, int]]) -> Tuple[BNData, PSET_ACYC]:
+    # store downstream relations in a graph
+    downstream_graph = nx.DiGraph()
+    downstream_graph.add_nodes_from(boundary_nodes)
+    for node in boundary_nodes:
+        for _, successors in nx.bfs_successors(bn.dag, node):
+            downstream_graph.add_edges_from((node, succ) for succ in successors
+                                      if succ not in seen)
+    #downstream.remove_nodes_from(seen - boundary_nodes)  # ignore inner red nodes
+    assert seen.intersection(downstream_graph.nodes).issubset(boundary_nodes), \
+        "downstream connectivity graph contains inner nodes"
+    downstream_graph.add_edges_from(forced_arcs)
+
     downstream = set()
     if not RELAXED_PARENTS:
-        # compute collective downstream global green vertices
-        for node in boundary_nodes:
-            for layer, successors in nx.bfs_successors(bn.dag, node):
-                downstream.update(successors)
-        downstream -= seen  # ignore local red vertices
+        downstream = set(downstream_graph.nodes())-seen
 
     # construct score function data for local instance
     data: BNData = {node: dict() for node in seen}
-    substitutions = {node: dict() for node in seen}
+    pset_acyc: PSET_ACYC = dict()
     for node, psets in filter_read_bn(bn.input_file, seen).items():
         if node in boundary_nodes:
             if RELAXED_PARENTS:
-                # compute outside vertices downstream from only current node
-                downstream = set()
-                for vertex, successors in nx.bfs_successors(bn.dag, node):
-                    downstream.update(successors)
-                downstream -= seen  # ignore local red vertices
-                # not strictly necessary but better to handle it in processing
-                # than to pass it over to maxsat solver
-                downstream |= forced_arc_dict[node]  # add back the forced arc ones
-
+                downstream = set(downstream_graph.successors(node))
             for pset, score in psets.items():
                 if pset.intersection(downstream):
                     continue  # reject because pset contains downstream verts
@@ -154,16 +153,19 @@ def get_data_for_subtree(bn: TWBayesianNetwork, boundary_nodes: set, seen: set,
                     bag_id = bn.td.bag_containing(pset | {node})
                     if bag_id == -1:
                         continue  # reject because required bag doesnt already exist in td
-                if pset_in not in data[node] or data[node][pset_in] < score:
-                    data[node][pset_in] = score
-                    if len(pset_in) < len(pset):
-                        substitutions[node][pset_in] = pset
+                    rem_parents = pset - pset_in
+                    req_acyc = set()
+                    for parent in rem_parents:
+                        if parent in downstream_graph:
+                            req_acyc.update(downstream_graph.predecessors(parent))
+                    pset_acyc[(node, pset)] = req_acyc
+                data[node][pset] = score
         else:  # internal node
             for pset, score in psets.items():
                 # internal vertices are not allowed outside parents
                 if pset.issubset(seen):
                     data[node][pset] = score
-    return data, substitutions
+    return data, pset_acyc
 
 
 def compute_max_score(data: BNData, bn: BayesianNetwork) -> float:
@@ -173,15 +175,20 @@ def compute_max_score(data: BNData, bn: BayesianNetwork) -> float:
     return max_score
 
 
+METRICS = ("start_score", "num_passes", "num_improvements", "skipped", "nosolution")
+
 class Solution(object):
     def __init__(self, value=None, logger: Callable = None):
         self.value: TWBayesianNetwork = value
-        self.logger = logger
         # other metrics to track
-        self.start_score = 0
-        self.num_passes = 0
-        self.num_improvements = 0
-        self.skipped = 0
+        self.data = dict.fromkeys(METRICS, 0)
+        # mute logger for code completion hack
+        self.logger = None
+        # for code completion
+        self.start_score = self.num_passes = self.num_improvements = \
+        self.skipped = self.nosolution = 0
+        # set proper value for logger now
+        self.logger = logger
 
     def update(self, new_value):
         if self.logger is not None:
@@ -198,6 +205,25 @@ def log_potential(old, new, max, offset, best):
         f.write(f"{old:.5f},{new:.5f},{max:.5f}\n")
 
 
+def _getter_factory(metric: str):
+    def getter(self: Solution):
+        return self.data[metric]
+    return getter
+
+
+def _setter_factory(metric: str):
+    def setter(self: Solution, val):
+        self.data[metric] = val
+        if self.logger is not None:
+            self.logger({metric: val})
+    return setter
+
+
+for metric in METRICS:
+    setattr(Solution, metric,
+            property(_getter_factory(metric), _setter_factory(metric)))
+
+
 SOLUTION = Solution()  # placeholder global solution variable
 
 
@@ -206,20 +232,23 @@ def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT
     td = bn.td
     tw = td.width
     selected, seen = find_subtree(td, budget, history, debug=False)
-    forced_arcs, forced_cliques, data, subs = prepare_subtree(bn, selected, seen, debug)
+    forced_arcs, forced_cliques, data, pset_acyc = prepare_subtree(bn, selected, seen, debug)
     # if debug:
     #     print("filtered data:-")
     #     pprint(data)
     old_score = bn.compute_score(seen)
     max_score = compute_max_score(data, bn)
     if RELAXED_PARENTS:
-        assert max_score >= old_score, "max score less than old score"
+        assert max_score + EPSILON >= old_score, "max score less than old score"
+        if max_score < old_score:
+            print("#### max score smaller than old score modulo epsilon")
     cur_offset = sum(bn.offsets[node] for node in seen)
     if debug: print(f"potential max: {(max_score - cur_offset)/bn.best_norm_score:.5f}", end="")
     if (max_score - cur_offset)/bn.best_norm_score <= LAZY_THRESHOLD:
         if debug: print(" skipping ####")
         SOLUTION.skipped += 1
         return
+    pos = dict()  # placeholder layout
     if not CLUSTER and debug:
         pos = pygraphviz_layout(bn.dag, prog='dot')
         nx.draw(bn.dag, pos, with_labels=True)
@@ -231,13 +260,13 @@ def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT
     if debug:
         print("old parents:-")
         pprint({node: par for node, par in bn.parents.items() if node in seen})
-    replbn = solve_bn(data, tw, bn.input_file, forced_arcs, forced_cliques, timeout, debug)
-    # perform substitutions
-    for node, pset in replbn.parents.items():
-        if pset in subs[node]:
-            if debug: print(f"performed substition {pset}->{subs[node][pset]}")
-            replbn.parents[node] = subs[node][pset]
-    replbn.recompute_dag()
+    try:
+        replbn = solve_bn(data, tw, bn.input_file, forced_arcs, forced_cliques,
+                          pset_acyc, timeout, debug)
+    except NoSolutionException:
+        SOLUTION.nosolution += 1
+        print("no solution found by maxsat, skipping")
+        return
     new_score = replbn.compute_score()
     log_potential(old_score, new_score, max_score, cur_offset, bn.best_norm_score)
     recorded, potential = new_score-old_score, max_score-old_score
@@ -265,8 +294,12 @@ def slim(filename: str, treewidth: int, budget: int = BUDGET,
          heuristic=HEURISTIC, offset: int = OFFSET, seed=SEED, debug=False):
     start = now()
     def elapsed(): return f"(after {now()-start:.1f} s.)"
-    if debug: print(f"running initial heuristic for {offset}s")
-    bn = run_blip(filename, treewidth, timeout=offset, seed=seed, solver=heuristic)
+    if START_WITH is not None:
+        if debug: print(f"starting with {START_WITH}, not running heuristic")
+        bn = parse_res(filename, treewidth, START_WITH)
+    else:
+        if debug: print(f"running initial heuristic for {offset}s")
+        bn = run_blip(filename, treewidth, timeout=offset, seed=seed, solver=heuristic)
     bn.verify()
     SOLUTION.update(bn)
     if LAZY_THRESHOLD > 0:
@@ -310,9 +343,7 @@ def register_handler():
 
 def wandb_configure(wandb: wandb, args):
     basename, ext = os.path.splitext(os.path.basename(args.file))
-    instance, samples = basename.split("-")
-    wandb.config.instance = instance
-    wandb.config.samples = int(samples)
+    wandb.config.instance = basename
     wandb.config.treewidth = args.treewidth
     wandb.config.budget = args.budget
     wandb.config.sat_timeout = args.sat_timeout
@@ -321,8 +352,13 @@ def wandb_configure(wandb: wandb, args):
     wandb.config.threshold = args.lazy_threshold
     wandb.config.seed = args.random_seed
     wandb.config.method = 'heur' if args.compare else 'slim'
+    # process config
+    wandb.config.platform = "cluster" if CLUSTER else "workstation"
+    wandb.config.jobid = os.environ.get("MY_JOB_ID", -1)
+    wandb.config.taskid = os.environ.get("MY_TASK_ID", -1)
 
 
+# noinspection PyTypeChecker
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 parser.add_argument("file", help="path to input file")
 parser.add_argument("treewidth", help="bound for treewidth", type=int)
@@ -348,6 +384,9 @@ parser.add_argument("-x", "--relaxed-parents", action="store_true",
 parser.add_argument("-r", "--random-seed", type=int, default=SEED,
                     help="random seed (set 0 for no seed)")
 parser.add_argument("-l", "--logging", action="store_true", help="wandb logging")
+parser.add_argument("--project-name", default="twbnslim-test", help="wandb project name")
+parser.add_argument("--start-with", default=None,
+                    help="optionally skip heuristic and start with this solution")
 parser.add_argument("-v", "--verbose", action="store_true", help="verbose mode")
 
 if __name__ == '__main__':
@@ -355,19 +394,18 @@ if __name__ == '__main__':
     filepath = os.path.abspath(args.file)
     LAZY_THRESHOLD = args.lazy_threshold
     RELAXED_PARENTS = args.relaxed_parents
+    if args.start_with is not None:
+        START_WITH = os.path.abspath(args.start_with)
+    logger = lambda x: x  # no op
+    # logger = lambda x: print(f"log: {x}")  # local log
     if args.logging:
-        wandb.init(project='twbnslim-test')
+        wandb.init(project=args.project_name)
         wandb_configure(wandb, args)
-        SOLUTION = Solution(logger=wandb.log)
-    else:
-        SOLUTION = Solution()
+        logger = wandb.log
+    SOLUTION = Solution(logger=logger)
 
     # compare and exit if only comparison requested
     if args.compare:
-        if args.logging:
-            logger = wandb.log
-        else:
-            logger = lambda x: x
         monitor_blip(filepath, args.treewidth, logger, timeout=args.max_time,
                      seed=args.random_seed, solver=args.heuristic, debug=args.verbose)
         sys.exit()
@@ -383,15 +421,11 @@ if __name__ == '__main__':
         if SOLUTION.value is None:
             print("no solution computed so far")
         else:
-            success_rate = SOLUTION.num_improvements/(SOLUTION.num_passes-SOLUTION.skipped)
-            metrics = {"start_score": SOLUTION.start_score,
-                       "num_passes": SOLUTION.num_passes,
-                       "num_improvements": SOLUTION.num_improvements,
-                       "success_rate": success_rate,
-                       "skipped": SOLUTION.skipped}
+            success_rate = SOLUTION.num_improvements / (SOLUTION.num_passes - SOLUTION.skipped)
             if args.logging:
-                wandb.log(metrics)
+                wandb.log({"success_rate": success_rate})
             else:
                 print("final metrics:")
-                pprint(metrics)
+                pprint(SOLUTION.data)
+                print(f"success_rate: {success_rate:.2%}")
                 print(f"final score: {SOLUTION.value.score:.5f}")
