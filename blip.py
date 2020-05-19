@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from networkx.drawing.nx_agraph import pygraphviz_layout
 
 SOLVER_DIR = "../solvers"
+SCORE_PATN = re.compile(r"New improvement! (?P<score>[\d.-]+) \(after (?P<time>[\d.-]+) s.\)")
 
 
 class BayesianNetwork(object):
@@ -131,7 +132,7 @@ class TWBayesianNetwork(BayesianNetwork):
         return triangulated
 
 
-def parse_res(filename, treewidth, outfile, debug=False):
+def parse_res(filename, treewidth, outfile, debug=False) -> TWBayesianNetwork:
     bn = TWBayesianNetwork(tw=treewidth, input_file=filename)
     with open(outfile) as out:
         for line in out:
@@ -159,12 +160,11 @@ def parse_res(filename, treewidth, outfile, debug=False):
 
 
 def run_blip(filename, treewidth, outfile="temp.res", timeout=10, seed=0,
-             solver="kg", logfile="temp.log", debug=False):
+             solver="kg", logfile="temp.log", debug=False) -> TWBayesianNetwork:
     basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"),
                f"solver.{solver}", "-v", "1"]
     args = ["-j", filename, "-w", str(treewidth), "-r", outfile,
             "-t", str(timeout), "-seed", str(seed), "-l", logfile]
-    # blip width convention is off by one (trees have width 2)
     cmd = basecmd + args
     if debug: print("running blip, cmd:", cmd)
     proc = subprocess.run(cmd, stdout=subprocess.PIPE)
@@ -181,19 +181,62 @@ def monitor_blip(filename, treewidth, logger: Callable, outfile="temp.res",
                f"solver.{solver}", "-v", "1"]
     args = ["-j", filename, "-w", str(treewidth), "-r", outfile,
             "-t", str(timeout), "-seed", str(seed)]
-    # blip width convention is off by one (trees have width 2)
     cmd = basecmd + args
-    if debug: print("running blip, cmd:", cmd)
-    pattern = re.compile(r"New improvement! (?P<score>[\d.-]+) \(after (?P<time>[\d.-]+) s.\)")
+    if debug: print("monitoring blip, cmd:", cmd)
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=1,
                           universal_newlines=True) as proc:
         for line in proc.stdout:
             if debug: print("got line:", line, end='')
-            match = pattern.match(line)
+            match = SCORE_PATN.match(line)
             if match:
                 score = float(match['score'])
                 logger({"score": score})
     print(f"done returncode: {proc.returncode}")
+
+
+def start_blip_proc(filename, treewidth, outfile="temp.res",
+                    timeout=10, seed=0, solver="kg", debug=False) -> subprocess.Popen:
+    basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"),
+               f"solver.{solver}", "-v", "1"]
+    args = ["-j", filename, "-w", str(treewidth), "-r", outfile,
+            "-t", str(timeout), "-seed", str(seed)]
+    cmd = basecmd + args
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=1,
+                            universal_newlines=True)
+    os.set_blocking(proc.stdout.fileno(), False)  # set stdout to be non-blocking
+    if debug: print(f"starting blip proc, pid: {proc.pid}, \ncmd: {cmd}")
+    return proc
+
+
+def check_blip_proc(proc: subprocess.Popen, debug=False) -> float:
+    score = float("-infinity")
+    rc = proc.poll()
+    if rc is not None:
+        if debug: print(f"blip proc already terminated with rc:", rc)
+        return score
+    while True:
+        line = proc.stdout.readline()
+        if line:
+            if debug: print("got line:", line, end='')
+            match = SCORE_PATN.match(line)
+            if match:
+                score = float(match['score'])
+        else:
+            rc = proc.poll()
+            if rc is not None:
+                if debug: print(f"no output and proc is completed (rc: {rc})")
+            else:
+                if debug: print(f"no output and proc is still running")
+            break
+    return score
+
+
+def stop_blip_proc(proc: subprocess.Popen):
+    proc.terminate()
+    proc.stdout.close()
+    if proc.stderr is not None: proc.stderr.close()
+    if proc.stdin is not None: proc.stdin.close()
+    proc.wait()
 
 
 if __name__ == '__main__':

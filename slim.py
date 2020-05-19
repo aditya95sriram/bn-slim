@@ -7,14 +7,15 @@ import networkx as nx
 import random
 from typing import Dict, List, Tuple, Set, FrozenSet, Callable
 from pprint import pprint
-from time import time as now
+from time import sleep, time as now
 import argparse
 import signal
 from collections import Counter
 import statistics
 
 # internal
-from blip import run_blip, BayesianNetwork, TWBayesianNetwork, monitor_blip, parse_res
+from blip import run_blip, BayesianNetwork, TWBayesianNetwork, monitor_blip, \
+    parse_res, start_blip_proc, check_blip_proc, stop_blip_proc
 from utils import TreeDecomposition, pick, pairs, filter_read_bn, BNData, NoSolutionException
 from berg_encoding import solve_bn, PSET_ACYC
 
@@ -42,6 +43,7 @@ LAZY_THRESHOLD = 0.0
 START_WITH = None
 RELAXED_PARENTS = False
 TRAV_STRAT = "random"
+MIMIC = False
 
 
 def find_start_bag(td: TreeDecomposition, history: Counter = None, debug=False):
@@ -190,7 +192,8 @@ def compute_max_score(data: BNData, bn: BayesianNetwork) -> float:
     return max_score
 
 
-METRICS = ("start_score", "num_passes", "num_improvements", "skipped", "nosolution")
+METRICS = ("start_score", "num_passes", "num_improvements", "skipped",
+           "nosolution", "restarts")
 
 class Solution(object):
     def __init__(self, value=None, logger: Callable = None):
@@ -201,7 +204,7 @@ class Solution(object):
         self.logger = None
         # for code completion
         self.start_score = self.num_passes = self.num_improvements = \
-        self.skipped = self.nosolution = 0
+        self.skipped = self.nosolution = self.restarts = 0
         # set proper value for logger now
         self.logger = logger
 
@@ -310,12 +313,25 @@ def slim(filename: str, treewidth: int, budget: int = BUDGET,
          heuristic=HEURISTIC, offset: int = OFFSET, seed=SEED, debug=False):
     start = now()
     def elapsed(): return f"(after {now()-start:.1f} s.)"
+    heur_proc = outfile = None  # placeholder
     if START_WITH is not None:
         if debug: print(f"starting with {START_WITH}, not running heuristic")
         bn = parse_res(filename, treewidth, START_WITH)
     else:
-        if debug: print(f"running initial heuristic for {offset}s")
-        bn = run_blip(filename, treewidth, timeout=offset, seed=seed, solver=heuristic)
+        if MIMIC:
+            if debug: print("starting heuristic proc for mimicking")
+            outfile = "temp-mimic.res"
+            heur_proc = start_blip_proc(filename, treewidth, outfile=outfile,
+                                        timeout=max_time, seed=seed,
+                                        solver=heuristic, debug=False)
+            if debug: print(f"waiting {offset}s")
+            sleep(offset)
+            # todo[safety]: make more robust by wrapping in try except (race condition)
+            bn = parse_res(filename, treewidth, outfile)
+        else:
+            if debug: print(f"running initial heuristic for {offset}s")
+            bn = run_blip(filename, treewidth, timeout=offset, seed=seed,
+                          solver=heuristic)
     bn.verify()
     SOLUTION.update(bn)
     if LAZY_THRESHOLD > 0:
@@ -335,18 +351,27 @@ def slim(filename: str, treewidth: int, budget: int = BUDGET,
             prev_score = new_score
             SOLUTION.update(bn)
             SOLUTION.num_improvements += 1
+        if MIMIC:
+            heur_score = check_blip_proc(heur_proc, debug=False)
+            if heur_score > bn.score:
+                if debug: print(f"heuristic solution better {heur_score:.5f} > {bn.score:.5f}, mimicking")
+                SOLUTION.restarts += 1
+                newbn = parse_res(filename, treewidth, outfile)
+                new_score = newbn.score
+                assert abs(new_score - heur_score) <= 1e-5, \
+                    f"score mismatch, reported: {heur_score}\tactual score: {new_score}"
+                bn = newbn
+                prev_score = new_score
+                # reset history because fresh tree decomposition
+                history = Counter(dict.fromkeys(bn.td.decomp.nodes, 0))
         if debug: print(f"* Iteration {i}:\t{bn.score:.5f} {elapsed()}")
         if now()-start > max_time:
             if debug: print("time limit exceeded, quitting")
             break
+    if MIMIC:
+        if debug: print("stopping heur proc")
+        stop_blip_proc(heur_proc)
     print(f"done {elapsed()}")
-    counts = list(history.values())
-    total, sumcount = len(counts), sum(counts)
-    mincount, maxcount = min(counts), max(counts)
-    avgcount, medcount = statistics.mean(counts), statistics.median(counts)
-    print(f"history ({total} bags, sum: {sumcount})")
-    print(f"min: {mincount}, max: {maxcount}")
-    print(f"avg: {avgcount}, median: {medcount}")
 
 
 class SolverInterrupt(BaseException): pass
@@ -376,6 +401,7 @@ def wandb_configure(wandb: wandb, args):
     wandb.config.seed = args.random_seed
     wandb.config.method = 'heur' if args.compare else 'slim'
     wandb.config.traversal = args.traversal_strategy
+    wandb.config.mimic = int(args.mimic)
     # process config
     wandb.config.platform = "cluster" if CLUSTER else "workstation"
     wandb.config.jobid = os.environ.get("MY_JOB_ID", -1)
@@ -408,6 +434,8 @@ parser.add_argument("-x", "--relaxed-parents", action="store_true",
 parser.add_argument("-y", "--traversal-strategy", default=TRAV_STRAT,
                     choices=["random", "post", "pre"],
                     help="td traversal strategy")
+parser.add_argument("-m", "--mimic", action="store_true",
+                    help="mimic heuristic if it outperforms")
 parser.add_argument("-r", "--random-seed", type=int, default=SEED,
                     help="random seed (set 0 for no seed)")
 parser.add_argument("-l", "--logging", action="store_true", help="wandb logging")
@@ -421,6 +449,7 @@ if __name__ == '__main__':
     filepath = os.path.abspath(args.file)
     LAZY_THRESHOLD = args.lazy_threshold
     RELAXED_PARENTS = args.relaxed_parents
+    MIMIC = args.mimic
     if args.start_with is not None:
         START_WITH = os.path.abspath(args.start_with)
     TRAV_STRAT = args.traversal_strategy
