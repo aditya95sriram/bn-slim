@@ -11,6 +11,7 @@ from time import time as now
 import argparse
 import signal
 from collections import Counter
+import statistics
 
 # internal
 from blip import run_blip, BayesianNetwork, TWBayesianNetwork, monitor_blip, parse_res
@@ -40,10 +41,24 @@ SEED = 9
 LAZY_THRESHOLD = 0.0
 START_WITH = None
 RELAXED_PARENTS = False
+TRAV_STRAT = "random"
 
 
 def find_start_bag(td: TreeDecomposition, history: Counter = None, debug=False):
-    return pick(td.bags.keys())  # randomly pick a bag
+    if TRAV_STRAT == "random":
+        return pick(td.bags.keys())  # randomly pick a bag
+    else:  # pick bag with least count and earliest in order
+        if TRAV_STRAT == "post":
+            trav_order = list(nx.dfs_postorder_nodes(td.decomp))
+        elif TRAV_STRAT == "pre":
+            trav_order = list(nx.dfs_postorder_nodes(td.decomp))
+        else:
+            raise ValueError(f"invalid traversal strategy {TRAV_STRAT}")
+        mincount = min(history.values())
+        # todo[opt]: avoid retraversing every time
+        for bag_id in trav_order:
+            if history[bag_id] == mincount:
+                return bag_id
 
 
 def find_subtree(td: TreeDecomposition, budget: int, history: Counter = None,
@@ -232,6 +247,7 @@ def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT
     td = bn.td
     tw = td.width
     selected, seen = find_subtree(td, budget, history, debug=False)
+    history.update(selected)
     forced_arcs, forced_cliques, data, pset_acyc = prepare_subtree(bn, selected, seen, debug)
     # if debug:
     #     print("filtered data:-")
@@ -308,7 +324,7 @@ def slim(filename: str, treewidth: int, budget: int = BUDGET,
     prev_score = bn.score
     print(f"Starting score: {prev_score:.5f}")
     SOLUTION.start_score = prev_score
-    history = Counter()
+    history = Counter(dict.fromkeys(bn.td.decomp.nodes, 0))
     if seed: random.seed(seed)
     for i in range(max_passes):
         slimpass(bn, budget, sat_timeout, history, debug=False)
@@ -324,6 +340,13 @@ def slim(filename: str, treewidth: int, budget: int = BUDGET,
             if debug: print("time limit exceeded, quitting")
             break
     print(f"done {elapsed()}")
+    counts = list(history.values())
+    total, sumcount = len(counts), sum(counts)
+    mincount, maxcount = min(counts), max(counts)
+    avgcount, medcount = statistics.mean(counts), statistics.median(counts)
+    print(f"history ({total} bags, sum: {sumcount})")
+    print(f"min: {mincount}, max: {maxcount}")
+    print(f"avg: {avgcount}, median: {medcount}")
 
 
 class SolverInterrupt(BaseException): pass
@@ -352,6 +375,7 @@ def wandb_configure(wandb: wandb, args):
     wandb.config.threshold = args.lazy_threshold
     wandb.config.seed = args.random_seed
     wandb.config.method = 'heur' if args.compare else 'slim'
+    wandb.config.traversal = args.traversal_strategy
     # process config
     wandb.config.platform = "cluster" if CLUSTER else "workstation"
     wandb.config.jobid = os.environ.get("MY_JOB_ID", -1)
@@ -381,6 +405,9 @@ parser.add_argument("-z", "--lazy-threshold", type=float, default=LAZY_THRESHOLD
 parser.add_argument("-x", "--relaxed-parents", action="store_true",
                     help="relax allowed parent sets for maxsat encoding\n"
                          "[warning: use at own risk, could terminate abruptly]")
+parser.add_argument("-y", "--traversal-strategy", default=TRAV_STRAT,
+                    choices=["random", "post", "pre"],
+                    help="td traversal strategy")
 parser.add_argument("-r", "--random-seed", type=int, default=SEED,
                     help="random seed (set 0 for no seed)")
 parser.add_argument("-l", "--logging", action="store_true", help="wandb logging")
@@ -396,6 +423,7 @@ if __name__ == '__main__':
     RELAXED_PARENTS = args.relaxed_parents
     if args.start_with is not None:
         START_WITH = os.path.abspath(args.start_with)
+    TRAV_STRAT = args.traversal_strategy
     logger = lambda x: x  # no op
     # logger = lambda x: print(f"log: {x}")  # local log
     if args.logging:
