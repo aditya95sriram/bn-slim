@@ -10,8 +10,8 @@ import shutil
 
 # internal
 from samer_veith import SvEncoding, SelfNamingDict
-from utils import num_nodes_bn, read_bn, read_model, BNData, TreeDecomposition
-from utils import pairs, ord_triples, posdict_to_ordering, check_subgraph
+from utils import read_bn, read_model, BNData, TreeDecomposition, NoSolutionException
+from utils import pairs, posdict_to_ordering, check_subgraph
 from blip import TWBayesianNetwork
 
 TOP = int(1e15)  # todo: make dynamic
@@ -264,11 +264,17 @@ def solve_bn(data: BNData, treewidth: int, input_file: str, forced_arcs=None,
             errfilename = "uwrmaxsat-err.log"
             with open(errfilename, 'w') as errfile:
                 errfile.write(err.stdout)
-                raise RuntimeError(f"error while running uwrmaxsat on {errcnf}"
-                                   f"\nrc: {err.returncode}, check {errfilename}")
+                #raise RuntimeError(f"error while running uwrmaxsat on {errcnf}"
+                #                   f"\nrc: {err.returncode}, check {errfilename}")
+                print(f"error while running uwrmaxsat on {errcnf}"
+                      f"\nrc: {err.returncode}, check {errfilename}")
+                raise NoSolutionException("nonzero returncode")
         else:
-            raise RuntimeError(f"error while running uwrmaxsat on {errcnf}"
-                               f"\nrc: {err.returncode}, no stdout captured")
+            #raise RuntimeError(f"error while running uwrmaxsat on {errcnf}"
+            #                   f"\nrc: {err.returncode}, no stdout captured")
+            print(f"error while running uwrmaxsat on {errcnf}"
+                  f"\nrc: {err.returncode}, no stdout captured")
+            raise NoSolutionException("nonzero returncode")
     else:  # if no error while maxsat solving
         runtime = now() - start
         model = read_model(output)

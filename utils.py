@@ -269,7 +269,7 @@ class TreeDecomposition(object):
                 parent = root_bag
             bag_idx = self.add_bag(neighbors | {u}, parent)
             blame[u] = bag_idx
-        self.verify()
+        if __debug__: self.verify()
 
     def verify(self, graph: nx.Graph=None):
         if graph is None: graph = self.graph
@@ -314,13 +314,11 @@ class TreeDecomposition(object):
         plt.show()
 
     def replace(self, selected, forced_cliques, new_td: 'TreeDecomposition'):
-        covered_nodes = set()  # assertion
         remap = dict()
         # add new bags
         for old_id, bag in new_td.bags.items():
             new_id = self.add_bag(bag)
             remap[old_id] = new_id
-            covered_nodes.update(bag)
         # add new edges
         for b1, b2 in new_td.decomp.edges:
             self.decomp.add_edge(remap[b1], remap[b2])
@@ -334,17 +332,22 @@ class TreeDecomposition(object):
                 f"required bag containing {set(intersection)} not found"
             self.decomp.add_edge(remap[req_bag_id], nbr_id)
 
-        existing_nodes = set()  # assertion
-        # delete old bags which are going to be replaced
+        # noinspection PyUnreachableCode
+        if __debug__:
+            covered_nodes = set()
+            for bag in new_td.bags.values():
+                covered_nodes.update(bag)
+            existing_nodes = set()
+            for sel_idx in selected:
+                existing_nodes.update(self.bags[sel_idx])
+            assert covered_nodes == existing_nodes, \
+                f"replacement td mismatch, " \
+                f"existing: {existing_nodes}\tcovered: {covered_nodes}"
+
+        # delete old bags which have been replaced
         for sel_idx in selected:
-            existing_nodes.update(self.bags[sel_idx])
             del self.bags[sel_idx]
             self.decomp.remove_node(sel_idx)
-
-        assert covered_nodes == existing_nodes, \
-            f"replacement td mismatch, " \
-            f"existing: {existing_nodes}\tcovered: {covered_nodes}"
-
 
     def bag_containing(self, members: Union[set, frozenset],
                        exclude: Set[int] = None) -> int:

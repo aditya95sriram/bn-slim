@@ -282,9 +282,9 @@ def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT
     try:
         replbn = solve_bn(data, tw, bn.input_file, forced_arcs, forced_cliques,
                           pset_acyc, timeout, debug)
-    except NoSolutionException:
+    except NoSolutionException as err:
         SOLUTION.nosolution += 1
-        print("no solution found by maxsat, skipping")
+        print(f"no solution found by maxsat, skipping (reason: {err})")
         return
     new_score = replbn.compute_score()
     log_potential(old_score, new_score, max_score, cur_offset, bn.best_norm_score)
@@ -305,7 +305,7 @@ def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT
         td.replace(selected, forced_cliques, replbn.td)
         # update bn with new bn
         bn.replace(replbn)
-        bn.verify()
+        if __debug__: bn.verify()
 
 
 def slim(filename: str, treewidth: int, budget: int = BUDGET,
@@ -316,6 +316,7 @@ def slim(filename: str, treewidth: int, budget: int = BUDGET,
     heur_proc = outfile = None  # placeholder
     if START_WITH is not None:
         if debug: print(f"starting with {START_WITH}, not running heuristic")
+        # todo[safety]: handle case when no heuristic solution so far
         bn = parse_res(filename, treewidth, START_WITH)
     else:
         if MIMIC:
@@ -332,7 +333,7 @@ def slim(filename: str, treewidth: int, budget: int = BUDGET,
             if debug: print(f"running initial heuristic for {offset}s")
             bn = run_blip(filename, treewidth, timeout=offset, seed=seed,
                           solver=heuristic)
-    bn.verify()
+    if __debug__: bn.verify()
     SOLUTION.update(bn)
     if LAZY_THRESHOLD > 0:
         print(f"lazy threshold: {LAZY_THRESHOLD} i.e. "
@@ -358,10 +359,11 @@ def slim(filename: str, treewidth: int, budget: int = BUDGET,
                 SOLUTION.restarts += 1
                 newbn = parse_res(filename, treewidth, outfile)
                 new_score = newbn.score
-                assert abs(new_score - heur_score) <= 1e-5, \
-                    f"score mismatch, reported: {heur_score}\tactual score: {new_score}"
+                assert abs(new_score >= heur_score - 1e-5), \
+                    f"score exaggerated, reported: {heur_score}\tactual score: {new_score}"
                 bn = newbn
                 prev_score = new_score
+                SOLUTION.update(bn)
                 # reset history because fresh tree decomposition
                 history = Counter(dict.fromkeys(bn.td.decomp.nodes, 0))
         if debug: print(f"* Iteration {i}:\t{bn.score:.5f} {elapsed()}")
@@ -401,6 +403,7 @@ def wandb_configure(wandb: wandb, args):
     wandb.config.seed = args.random_seed
     wandb.config.method = 'heur' if args.compare else 'slim'
     wandb.config.traversal = args.traversal_strategy
+    wandb.config.relaxed = int(args.relaxed_parents)
     wandb.config.mimic = int(args.mimic)
     # process config
     wandb.config.platform = "cluster" if CLUSTER else "workstation"
@@ -450,6 +453,10 @@ if __name__ == '__main__':
     LAZY_THRESHOLD = args.lazy_threshold
     RELAXED_PARENTS = args.relaxed_parents
     MIMIC = args.mimic
+    if args.budget <= args.treewidth:
+        print("budget smaller than treewidth bound, quitting")
+        sys.exit()
+    print("not"*__debug__, "running optimized")
     if args.start_with is not None:
         START_WITH = os.path.abspath(args.start_with)
     TRAV_STRAT = args.traversal_strategy
@@ -478,6 +485,8 @@ if __name__ == '__main__':
         if SOLUTION.value is None:
             print("no solution computed so far")
         else:
+            SOLUTION.value.verify()  # verify final bn
+            print("verified")
             success_rate = SOLUTION.num_improvements / (SOLUTION.num_passes - SOLUTION.skipped)
             if args.logging:
                 wandb.log({"success_rate": success_rate})
