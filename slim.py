@@ -16,7 +16,8 @@ import statistics
 # internal
 from blip import run_blip, BayesianNetwork, TWBayesianNetwork, monitor_blip, \
     parse_res, start_blip_proc, check_blip_proc, stop_blip_proc
-from utils import TreeDecomposition, pick, pairs, filter_read_bn, BNData, NoSolutionException
+from utils import TreeDecomposition, pick, pairs, filter_read_bn, BNData, NoSolutionException,\
+    get_domain_sizes, log_bag_metrics
 from berg_encoding import solve_bn, PSET_ACYC
 
 # optional
@@ -44,6 +45,7 @@ START_WITH = None
 RELAXED_PARENTS = False
 TRAV_STRAT = "random"
 MIMIC = False
+DOMAIN_SIZES: Dict[int, int] = dict()
 
 
 def find_start_bag(td: TreeDecomposition, history: Counter = None, debug=False):
@@ -195,6 +197,7 @@ def compute_max_score(data: BNData, bn: BayesianNetwork) -> float:
 METRICS = ("start_score", "num_passes", "num_improvements", "skipped",
            "nosolution", "restarts")
 
+
 class Solution(object):
     def __init__(self, value=None, logger: Callable = None):
         self.value: TWBayesianNetwork = value
@@ -335,6 +338,7 @@ def slim(filename: str, treewidth: int, budget: int = BUDGET,
                           solver=heuristic)
     if __debug__: bn.verify()
     SOLUTION.update(bn)
+    if DOMAIN_SIZES: log_bag_metrics(bn.td, DOMAIN_SIZES)
     if LAZY_THRESHOLD > 0:
         print(f"lazy threshold: {LAZY_THRESHOLD} i.e. "
               f"minimum delta required: {bn.best_norm_score*LAZY_THRESHOLD}")
@@ -439,6 +443,8 @@ parser.add_argument("-y", "--traversal-strategy", default=TRAV_STRAT,
                     help="td traversal strategy")
 parser.add_argument("-m", "--mimic", action="store_true",
                     help="mimic heuristic if it outperforms")
+parser.add_argument("-d", "--datfile", help="path to datfile, if omitted,"
+                                            "complexity-width will not be tracked")
 parser.add_argument("-r", "--random-seed", type=int, default=SEED,
                     help="random seed (set 0 for no seed)")
 parser.add_argument("-l", "--logging", action="store_true", help="wandb logging")
@@ -453,6 +459,7 @@ if __name__ == '__main__':
     LAZY_THRESHOLD = args.lazy_threshold
     RELAXED_PARENTS = args.relaxed_parents
     MIMIC = args.mimic
+    if args.datfile: DOMAIN_SIZES = get_domain_sizes(args.datfile)
     if args.budget <= args.treewidth:
         print("budget smaller than treewidth bound, quitting")
         sys.exit()
@@ -495,3 +502,5 @@ if __name__ == '__main__':
                 pprint(SOLUTION.data)
                 print(f"success_rate: {success_rate:.2%}")
                 print(f"final score: {SOLUTION.value.score:.5f}")
+                if DOMAIN_SIZES:
+                    log_bag_metrics(SOLUTION.value.td, DOMAIN_SIZES, append=True)

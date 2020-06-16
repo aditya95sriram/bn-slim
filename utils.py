@@ -6,6 +6,7 @@ import random
 from typing import Union, Tuple, Dict, List, Iterator, FrozenSet, TextIO, Set
 import sys, os
 from operator import itemgetter
+from functools import reduce
 
 import matplotlib.pyplot as plt
 from networkx.drawing.nx_agraph import graphviz_layout
@@ -160,6 +161,38 @@ def get_bn_stats(filename: str) -> Tuple[float, float, Dict[int, float]]:
         best_score += max(scores)
         offsets[node] = min(scores)
     return sum_score, best_score, offsets
+
+
+def get_domain_sizes(filename: str) -> Dict[int, int]:
+    with open(filename, 'r') as datfile:
+        _ = datfile.readline()  # skip header line
+        domain_sizes = [int(ds) for ds in datfile.readline().split()]
+        num_vars = len(domain_sizes)
+        return dict(zip(range(num_vars), domain_sizes))
+
+
+def compute_complexities(td: 'TreeDecomposition', domain_sizes: Dict[int, int]) \
+        -> Dict[int, int]:
+    complexities: Dict[int, int] = dict()
+    for bag_idx, bag in td.bags.items():
+        complexity = reduce(lambda a,b: a*b, (domain_sizes[var] for var in bag))
+        complexities[bag_idx] = complexity
+    return complexities
+
+
+def compute_complexity_width(td: 'TreeDecomposition', domain_sizes: Dict[int, int]):
+    return max(compute_complexities(td, domain_sizes).values())
+
+
+def log_bag_metrics(td: 'TreeDecomposition', domain_sizes: Dict[int, int], append=False):
+    if not domain_sizes: return  # don't run if domain_sizes not provided
+    mode = 'a' if append else 'w'
+    with open("bag_metrics.txt", mode) as outfile:
+        outfile.write(",".join(f"{len(bag)}" for bag in td.bags.values()))
+        outfile.write("\n")
+        outfile.write(",".join(map(str, compute_complexities(td, domain_sizes).values())))
+        outfile.write("\n")
+
 
 
 class NoSolutionException(BaseException): pass
