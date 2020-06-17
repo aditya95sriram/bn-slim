@@ -289,10 +289,10 @@ class TreeDecomposition(object):
         else:
             self.width = max_degree
         revorder = order[::-1]
-        cur_nodes = set(revorder[:self.width+1])
+        cur_nodes = {revorder[0]}
         root_bag = self.add_bag(cur_nodes)
         blame = {node: root_bag for node in cur_nodes}
-        for u in revorder[self.width+1:]:
+        for u in revorder[1:]:
             cur_nodes.add(u)
             neighbors = set(graph.subgraph(cur_nodes).neighbors(u))
             if neighbors:
