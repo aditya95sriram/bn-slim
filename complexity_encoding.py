@@ -4,12 +4,13 @@ import os
 import sys
 from samer_veith import SvEncoding
 from berg_encoding import TwbnEncoding, TwbnDecoder, SOLVER_DIR, TIMEOUT, TOP
-from typing import Dict
+from typing import Dict, Any, List
 import subprocess
 from time import time as now
 import shutil
 from utils import NoSolutionException, read_model, TreeDecomposition, compute_complexity_width
 from math import ceil, log2
+from collections import defaultdict
 
 import matplotlib.pyplot as plt
 from networkx.drawing.nx_agraph import graphviz_layout
@@ -19,27 +20,20 @@ class SvEncodingWithComplexity(SvEncoding):
 
     _add_comment = TwbnEncoding._add_comment
 
-    def __init__(self, stream, graph, shadow_counts: Dict[int, int], debug=False):
+    def __init__(self, stream, graph, weights: Dict[int, int], debug=False):
         super().__init__(stream, graph)
         self.debug = debug
-        self.shadow_counts: Dict[int, int] = shadow_counts
-        self.shadow_lookup = {i: dict() for i in range(self.num_nodes)}
-        self.shadow_reverse_lookup = dict()
-        ctr = self.num_nodes
-        for _u, counts in self.shadow_counts.items():
-            u = self.node_lookup[_u]
-            for i in range(counts):
-                self.shadow_lookup[u][i] = ctr
-                self.shadow_reverse_lookup[ctr] = (_u, i)
-                ctr += 1
+        self.weights: Dict[int, int] = weights
 
         # for debugging purposes
-        self.cardinality_counter_vars = []
+        if self.debug:
+            self.cardinality_counter_vars = []
+            self.current_cardinality_outer_var = None
+            self.current_cardinality_inner_vars = []
 
-    def encode_single_cardinality(self, bound, variables):
-        """Enforces cardinality constraint on 1-d structure of variables"""
-        jvals = list(sorted(variables.keys()))
-        jlim = len(jvals)
+    def encode_single_cardinality(self, bound, variables: List[int]):
+        """Enforces weighted cardinality constraint on 1-d structure of variables"""
+        jlim = len(variables)
         ctr = [[self._add_var() for _ in range(0, min(j+1, bound))] for j in range(jlim)]
 
         for j in range(1, jlim):
@@ -49,94 +43,60 @@ class SvEncodingWithComplexity(SvEncoding):
 
             # increment if variable and ctr
             for l in range(1, len(ctr[j])):
-                self._add_clause(-variables[jvals[j]], -ctr[j-1][l-1], ctr[j][l])
+                self._add_clause(-variables[j], -ctr[j-1][l-1], ctr[j][l])
 
         # initialize first counter if corr variable is true
         for j in range(jlim):
-            self._add_clause(-variables[jvals[j]], ctr[j][0])
+            self._add_clause(-variables[j], ctr[j][0])
 
         # conflict if target exceeded
         for j in range(bound, jlim):
-            self._add_clause(-variables[jvals[j]], -ctr[j-1][bound-1])
+            self._add_clause(-variables[j], -ctr[j-1][bound-1])
 
-        self.cardinality_counter_vars.append(ctr)
+        if self.debug:
+            for j in range(jlim):
+                outer_var = self.current_cardinality_outer_var
+                inner_var = self.current_cardinality_inner_vars[j]
+                self.cardinality_counter_vars.append((outer_var, inner_var, ctr[j]))
 
-    def encode_cardinality_sat(self, bound, variables):
+    def encode_cardinality_sat(self, bound, variables: Dict[int, Dict[int, int]]):
         for i in range(len(variables)):
-            self.encode_single_cardinality(bound, variables[i])
+            node = self.node_reverse_lookup[i]
+            vararray = []
+            if self.debug:
+                self.current_cardinality_outer_var = node
+                self.current_cardinality_inner_vars = []
+            for j in range(len(variables[i])):
+                var = variables[i][j]
+                other = self.node_reverse_lookup[j]
+                if other == node: continue
+                vararray.extend([var]*self.weights[other])
+                if self.debug: self.current_cardinality_inner_vars.extend([other]*self.weights[other])
+            self.encode_single_cardinality(bound - self.weights[node], vararray)
 
-    def encode_sat(self, target, cardinality=True):
-        # encode everything but cardinality
-        super().encode_sat(target, cardinality=False)
-        self.stream.seek(0, os.SEEK_END)
-
-        # encode complexity cardinality using shadow variables
-        # own shadows
-        for _u, counts in self.shadow_counts.items():
-            u = self.node_lookup[_u]
-            # clauses: forced arcs from u to shadows
-            if counts > 0:
-                self._add_comment(f"begin forced arcs from {_u}->shadows({_u}) {set(self.shadow_lookup[u].values())}")
-            for i in range(counts):
-                shadow = self.shadow_lookup[u][i]
-                self._add_clause(self.arc[u][shadow])
-            if counts > 0:
-                self._add_comment(f"end forced arcs from {_u}->shadows({_u}) {set(self.shadow_lookup[u].values())}")
-
-        # other's shadows
-        for _u in self.shadow_counts.keys():
-            for _v, counts in self.shadow_counts.items():
-                if _u == _v: continue
-                # clauses: shadowing main arcs u->v
-                if counts > 1: self._add_comment(f"begin {_u}->{_v} shadowing")
-                u, v = self.node_lookup[_u], self.node_lookup[_v]
-                for i in range(1, counts):
-                    shadow = self.shadow_lookup[v][i]
-                    self._add_clause(-self.arc[u][v], self.arc[u][shadow])
-                if counts > 1: self._add_comment(f"end {_u}->{_v} shadowing")
-
-        # now encode cardinality (accounting for shadow arcs)
-        self._add_comment("begin encode cardinality")
-        self.encode_cardinality_sat(target, self.arc)
-        self._add_comment("end encode cardinality")
-
-        # update header
-        self.replace_sat_placeholder()
-
-    def show_counters(self, model: set, elim_order):
-        def name(idx):
-            if idx in self.node_reverse_lookup:
-                return self.node_reverse_lookup[idx]
-            else:
-                var, ct = self.shadow_reverse_lookup[idx]
-                return f"{var}_{ct}"
-        variables = self.arc
-        ctr_var_list = self.cardinality_counter_vars
-        for i in range(len(ctr_var_list)):
-            iname = name(i)
-            ctr_vars = ctr_var_list[i]
-            arc_count = 0
-            # for j, jvar in zip(ctr_vars, sorted(variables[i].keys())):
-            # for j in range(len(ctr_vars)):
-            for j, jvar in enumerate(sorted(variables[i].keys())):
-                jname = name(jvar)
-                try:
-                    appears_before = (elim_order.index(iname) < elim_order.index(jname))
-                except ValueError:
-                    appears_before = True
-                arc_exists = appears_before and variables[i][jvar] in model
-                arc_count += arc_exists
-                print(f"{iname}->{jname}" + ("*" if arc_exists else " "), end="\t:\t")
-                print(*(int(var in model) for var in ctr_vars[j]))
-            print(f"({arc_count} arcs)\n")
+    def show_counters(self, model, elim_order):
+        if not self.debug: return
+        arc_counts = defaultdict(int)
+        prevu = self.cardinality_counter_vars[0][0]
+        for u, v, ctrs in self.cardinality_counter_vars:
+            if u != prevu:
+                print(f"{prevu} total arcs: {arc_counts[prevu]}\n")
+                prevu = u
+            appears_before = (elim_order.index(u) < elim_order.index(v))
+            arc_exists = appears_before and self.arc[self.node_lookup[u]][self.node_lookup[v]] in model
+            arc_counts[u] += arc_exists
+            print(f"{u}->{v}" + ("*" if arc_exists else " "), end="\t:\t")
+            print(*(int(var in model) for var in ctrs))
+        print(f"{prevu} total arcs: {arc_counts[prevu]}\n")
+        print(dict(arc_counts))
 
 
-def solve_graph(graph, shadow_counts, complexity_width, timeout: int = TIMEOUT,
+def solve_graph(graph, weights, complexity_width, timeout: int = TIMEOUT,
                 debug=False):
     cnfpath = "temp-cw.cnf"
     # logpath = "temp-cw.log"
     with open(cnfpath, 'w') as cnffile:
-        enc = SvEncodingWithComplexity(cnffile, graph, shadow_counts, debug)
+        enc = SvEncodingWithComplexity(cnffile, graph, weights, debug)
         # enc = SvEncoding(cnffile, graph)
         enc.encode_sat(complexity_width)
     print("enc:", enc.__class__.__name__)
@@ -187,7 +147,7 @@ def solve_graph(graph, shadow_counts, complexity_width, timeout: int = TIMEOUT,
 COMPLEXITY_WIDTH = 10
 
 
-def get_shadow_counts(domain_sizes):
+def get_weights(domain_sizes):
     return {node: int(ceil(log2(size))) for node, size in domain_sizes.items()}
 
 
@@ -203,19 +163,21 @@ if __name__ == '__main__':
     # g.add_edges_from("ac af bc bh cd eg eh fg gh".split())
     g = nx.fast_gnp_random_graph(5, p=0.5, seed=SEED)
     ds = {node: random.randint(2,16) for node in g.nodes}
-    shadow_counts = get_shadow_counts(ds)
-
     print("ds:", ds)
-    print("shadow count:", shadow_counts)
+    weights = get_weights(ds)
 
     # g.remove_edge(0, 3)
     # g.add_edge(0, 4)
-    # shadow_counts[4] = 2
+    # weights[4] = 2
 
-    # shadow_counts = {node: 1 for node in g.nodes}
-    # shadow_counts['h'] = 2
-    # shadow_counts['a'] = 2
-    td = solve_graph(g, shadow_counts, complexity_width=10, timeout=30, debug=True)
+    # weights = {node: 1 for node in g.nodes}
+    # weights['h'] = 2
+    # weights['a'] = 3
+
+    print("weights:", weights)
+    nx.draw(g, with_labels=True)
+    plt.show()
+    td = solve_graph(g, weights, complexity_width=10, timeout=30, debug=True)
     print(td.elim_order)
     cw = compute_complexity_width(td, ds)
     print("final cw:", cw)
