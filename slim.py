@@ -11,13 +11,15 @@ from time import sleep, time as now
 import argparse
 import signal
 from collections import Counter
+from operator import itemgetter
 import statistics
 
 # internal
 from blip import run_blip, BayesianNetwork, TWBayesianNetwork, monitor_blip, \
     parse_res, start_blip_proc, check_blip_proc, stop_blip_proc
 from utils import TreeDecomposition, pick, pairs, filter_read_bn, BNData, NoSolutionException,\
-    get_domain_sizes, log_bag_metrics
+    get_domain_sizes, log_bag_metrics, compute_complexity_width, weight_from_domain_size, \
+    compute_complexities
 from berg_encoding import solve_bn, PSET_ACYC
 
 # optional
@@ -46,11 +48,16 @@ RELAXED_PARENTS = False
 TRAV_STRAT = "random"
 MIMIC = False
 DOMAIN_SIZES: Dict[int, int] = dict()
+USE_COMPLEXITY_WIDTH = False
 
 
 def find_start_bag(td: TreeDecomposition, history: Counter = None, debug=False):
-    if TRAV_STRAT == "random":
-        return pick(td.bags.keys())  # randomly pick a bag
+    if USE_COMPLEXITY_WIDTH:  # pick bag with highest complexity
+        complexities = compute_complexities(td, DOMAIN_SIZES)
+        maxbagidx, _ = max(complexities.items(), key=itemgetter(1))
+        return maxbagidx
+    elif TRAV_STRAT == "random":  # randomly pick a bag
+        return pick(td.bags.keys())
     else:  # pick bag with least count and earliest in order
         if TRAV_STRAT == "post":
             trav_order = list(nx.dfs_postorder_nodes(td.decomp))
@@ -214,6 +221,10 @@ class Solution(object):
     def update(self, new_value):
         if self.logger is not None:
             self.logger({'score': new_value.score})
+            if USE_COMPLEXITY_WIDTH:
+                width = compute_complexity_width(new_value.td, DOMAIN_SIZES)
+                approx_width = compute_complexity_width(new_value.td, DOMAIN_SIZES, approx=True)
+                self.logger({'width': width, 'approx_width': approx_width})
         self.value = new_value
 
 
@@ -249,9 +260,12 @@ SOLUTION = Solution()  # placeholder global solution variable
 
 
 def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT,
-             history: Counter = None, debug=False):
+             history: Counter = None, width_bound: int = None, debug=False):
     td = bn.td
-    tw = td.width
+    if USE_COMPLEXITY_WIDTH:
+        final_width_bound = weight_from_domain_size(width_bound)
+    else:
+        final_width_bound = width_bound
     selected, seen = find_subtree(td, budget, history, debug=False)
     history.update(selected)
     forced_arcs, forced_cliques, data, pset_acyc = prepare_subtree(bn, selected, seen, debug)
@@ -282,9 +296,10 @@ def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT
     if debug:
         print("old parents:-")
         pprint({node: par for node, par in bn.parents.items() if node in seen})
+    domain_sizes = DOMAIN_SIZES if USE_COMPLEXITY_WIDTH else None
     try:
-        replbn = solve_bn(data, tw, bn.input_file, forced_arcs, forced_cliques,
-                          pset_acyc, timeout, debug)
+        replbn = solve_bn(data, final_width_bound, bn.input_file, forced_arcs, forced_cliques,
+                          pset_acyc, timeout, domain_sizes, debug)
     except NoSolutionException as err:
         SOLUTION.nosolution += 1
         print(f"no solution found by maxsat, skipping (reason: {err})")
@@ -304,14 +319,26 @@ def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT
         print("new parents:-")
         pprint(replbn.parents)
     if debug: print(f"score change: {old_score:.3f} -> {new_score:.3f}")
-    if new_score >= old_score:  # replacement condition
-        td.replace(selected, forced_cliques, replbn.td)
-        # update bn with new bn
-        bn.replace(replbn)
-        if __debug__: bn.verify()
+    old_cw = compute_complexity_width(td, DOMAIN_SIZES, include=selected)
+    new_cw = compute_complexity_width(replbn.td, DOMAIN_SIZES)
+    old_acw = compute_complexity_width(td, DOMAIN_SIZES, include=selected, approx=True)
+    new_acw = compute_complexity_width(replbn.td, DOMAIN_SIZES, approx=True)
+    print(f"old: {old_cw}|{old_acw}\tnew: {new_cw}|{new_acw}")
+    # replacement criterion
+    if USE_COMPLEXITY_WIDTH:
+        if new_cw > width_bound:
+            return False
+    else:
+        if new_score < old_score:
+            return False
+    td.replace(selected, forced_cliques, replbn.td)
+    # update bn with new bn
+    bn.replace(replbn)
+    if __debug__: bn.verify()
+    return True
 
 
-def slim(filename: str, treewidth: int, budget: int = BUDGET,
+def slim(filename: str, start_treewidth: int, budget: int = BUDGET,
          sat_timeout: int = TIMEOUT, max_passes=MAX_PASSES, max_time: int = MAX_TIME,
          heuristic=HEURISTIC, offset: int = OFFSET, seed=SEED, debug=False):
     start = now()
@@ -320,23 +347,29 @@ def slim(filename: str, treewidth: int, budget: int = BUDGET,
     if START_WITH is not None:
         if debug: print(f"starting with {START_WITH}, not running heuristic")
         # todo[safety]: handle case when no heuristic solution so far
-        bn = parse_res(filename, treewidth, START_WITH)
+        bn = parse_res(filename, start_treewidth, START_WITH)
     else:
         if MIMIC:
             if debug: print("starting heuristic proc for mimicking")
             outfile = "temp-mimic.res"
-            heur_proc = start_blip_proc(filename, treewidth, outfile=outfile,
+            heur_proc = start_blip_proc(filename, start_treewidth, outfile=outfile,
                                         timeout=max_time, seed=seed,
                                         solver=heuristic, debug=False)
             if debug: print(f"waiting {offset}s")
             sleep(offset)
             # todo[safety]: make more robust by wrapping in try except (race condition)
-            bn = parse_res(filename, treewidth, outfile)
+            bn = parse_res(filename, start_treewidth, outfile)
         else:
             if debug: print(f"running initial heuristic for {offset}s")
-            bn = run_blip(filename, treewidth, timeout=offset, seed=seed,
+            bn = run_blip(filename, start_treewidth, timeout=offset, seed=seed,
                           solver=heuristic)
     if __debug__: bn.verify()
+    start_cw = compute_complexity_width(bn.td, DOMAIN_SIZES)
+    start_acw = compute_complexity_width(bn.td, DOMAIN_SIZES, approx=True)
+    complexity_bound = start_cw//2  # todo[opt]: maybe use weight as bound?
+    print(f"start cw: {start_cw}\tacw:{start_acw}")
+    if USE_COMPLEXITY_WIDTH:
+        print(f"setting complexity bound: {complexity_bound}|{weight_from_domain_size(complexity_bound)}")
     SOLUTION.update(bn)
     if DOMAIN_SIZES: log_bag_metrics(bn.td, DOMAIN_SIZES)
     if LAZY_THRESHOLD > 0:
@@ -348,7 +381,8 @@ def slim(filename: str, treewidth: int, budget: int = BUDGET,
     history = Counter(dict.fromkeys(bn.td.decomp.nodes, 0))
     if seed: random.seed(seed)
     for i in range(max_passes):
-        slimpass(bn, budget, sat_timeout, history, debug=False)
+        width_bound = complexity_bound if USE_COMPLEXITY_WIDTH else start_treewidth
+        replaced = slimpass(bn, budget, sat_timeout, history, width_bound, debug=False)
         SOLUTION.num_passes += 1
         new_score = bn.score
         if new_score > prev_score:
@@ -356,12 +390,14 @@ def slim(filename: str, treewidth: int, budget: int = BUDGET,
             prev_score = new_score
             SOLUTION.update(bn)
             SOLUTION.num_improvements += 1
+        elif replaced:
+            print("*** No improvement, but replacement performed ***")
         if MIMIC:
             heur_score = check_blip_proc(heur_proc, debug=False)
             if heur_score > bn.score:
                 if debug: print(f"heuristic solution better {heur_score:.5f} > {bn.score:.5f}, mimicking")
                 SOLUTION.restarts += 1
-                newbn = parse_res(filename, treewidth, outfile)
+                newbn = parse_res(filename, start_treewidth, outfile)
                 new_score = newbn.score
                 assert abs(new_score >= heur_score - 1e-5), \
                     f"score exaggerated, reported: {heur_score}\tactual score: {new_score}"
@@ -445,6 +481,9 @@ parser.add_argument("-m", "--mimic", action="store_true",
                     help="mimic heuristic if it outperforms")
 parser.add_argument("-d", "--datfile", help="path to datfile, if omitted,"
                                             "complexity-width will not be tracked")
+parser.add_argument("-w", "--complexity-width", action="store_true",
+                    help="minimizing complexity width becomes main objective\n"
+                         "[requires option -d|--datfile]")
 parser.add_argument("-r", "--random-seed", type=int, default=SEED,
                     help="random seed (set 0 for no seed)")
 parser.add_argument("-l", "--logging", action="store_true", help="wandb logging")
@@ -460,6 +499,10 @@ if __name__ == '__main__':
     RELAXED_PARENTS = args.relaxed_parents
     MIMIC = args.mimic
     if args.datfile: DOMAIN_SIZES = get_domain_sizes(args.datfile)
+    if args.complexity_width:
+        USE_COMPLEXITY_WIDTH = True
+        if DOMAIN_SIZES is None:
+            parser.error("--complexity-width requires --datfile")
     if args.budget <= args.treewidth:
         print("budget smaller than treewidth bound, quitting")
         sys.exit()
@@ -475,7 +518,7 @@ if __name__ == '__main__':
         logger = wandb.log
     SOLUTION = Solution(logger=logger)
 
-    # compare and exit if only comparison requested
+    # if comparison requested, compare then exit
     if args.compare:
         monitor_blip(filepath, args.treewidth, logger, timeout=args.max_time,
                      seed=args.random_seed, solver=args.heuristic, debug=args.verbose)
@@ -504,3 +547,5 @@ if __name__ == '__main__':
                 print(f"final score: {SOLUTION.value.score:.5f}")
                 if DOMAIN_SIZES:
                     log_bag_metrics(SOLUTION.value.td, DOMAIN_SIZES, append=True)
+                    print("complexity-width:", compute_complexity_width(SOLUTION.value.td,
+                                                                        DOMAIN_SIZES))

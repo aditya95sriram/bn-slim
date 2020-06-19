@@ -1,15 +1,12 @@
 #!/bin/python3.6
 
-import os
 import sys
 from samer_veith import SvEncoding
-from berg_encoding import TwbnEncoding, TwbnDecoder, SOLVER_DIR, TIMEOUT, TOP
-from typing import Dict, Any, List
+from typing import Dict, List
 import subprocess
 from time import time as now
-import shutil
-from utils import NoSolutionException, read_model, TreeDecomposition, compute_complexity_width
-from math import ceil, log2
+from utils import read_model, TreeDecomposition, compute_complexity_width, \
+    weights_from_domain_sizes
 from collections import defaultdict
 
 import matplotlib.pyplot as plt
@@ -18,11 +15,9 @@ from networkx.drawing.nx_agraph import graphviz_layout
 
 class SvEncodingWithComplexity(SvEncoding):
 
-    _add_comment = TwbnEncoding._add_comment
-
-    def __init__(self, stream, graph, weights: Dict[int, int], debug=False):
+    def __init__(self, stream, graph, weights: Dict[int, int] = None, debug=False):
         super().__init__(stream, graph)
-        self.debug = debug
+        if not hasattr(self, 'debug'): self.debug = debug
         self.weights: Dict[int, int] = weights
 
         # for debugging purposes
@@ -32,7 +27,14 @@ class SvEncodingWithComplexity(SvEncoding):
             self.current_cardinality_inner_vars = []
 
     def encode_single_cardinality(self, bound, variables: List[int]):
-        """Enforces weighted cardinality constraint on 1-d structure of variables"""
+        """Enforces cardinality constraint on list of variables (repeats allowed)"""
+        if bound <= 0:
+            if self.debug:
+                print(f"warning: non-positive bound {bound} provided, forcing UNSAT")
+            self._add_clause(-1)
+            self._add_clause(1)
+            return
+
         jlim = len(variables)
         ctr = [[self._add_var() for _ in range(0, min(j+1, bound))] for j in range(jlim)]
 
@@ -60,6 +62,13 @@ class SvEncodingWithComplexity(SvEncoding):
                 self.cardinality_counter_vars.append((outer_var, inner_var, ctr[j]))
 
     def encode_cardinality_sat(self, bound, variables: Dict[int, Dict[int, int]]):
+        """
+        Enforce weighted cardinality constraint on 2-d structure of variables
+        * weights are read from self.weights
+        * bound is adjusted by weight of the outer variable
+        * inner variable is replicated as many times as its weight to form final
+          list of variables to be cardinally constrained
+        """
         for i in range(len(variables)):
             node = self.node_reverse_lookup[i]
             vararray = []
@@ -91,69 +100,37 @@ class SvEncodingWithComplexity(SvEncoding):
         print(dict(arc_counts))
 
 
-def solve_graph(graph, weights, complexity_width, timeout: int = TIMEOUT,
-                debug=False):
+def solve_graph(graph, weights, complexity_width, timeout: int = 10, debug=False):
     cnfpath = "temp-cw.cnf"
-    # logpath = "temp-cw.log"
     with open(cnfpath, 'w') as cnffile:
         enc = SvEncodingWithComplexity(cnffile, graph, weights, debug)
-        # enc = SvEncoding(cnffile, graph)
         enc.encode_sat(complexity_width)
     print("enc:", enc.__class__.__name__)
     if debug: print("encoding done")
-    # base_cmd = [os.path.join(SOLVER_DIR, "uwrmaxsat"), "-m", "-v0"]
-    # cmd = base_cmd + [cnfpath, f"-cpu-lim={timeout}"]
     base_cmd = ["glucose", "-verb=0", "-model"]
     cmd = base_cmd + [cnfpath, f"-cpu-lim={timeout}"]
     start = now()
-    try:
-        proc = subprocess.run(cmd, universal_newlines=True,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    except subprocess.CalledProcessError as err:
-        # copy over problematic cnf file
-        errcnf = "error.cnf"
-        shutil.copy(cnfpath, errcnf)
-        if err.stdout is not None:
-            errfilename = "uwrmaxsat-err.log"
-            with open(errfilename, 'w') as errfile:
-                errfile.write(err.stdout)
-                #raise RuntimeError(f"error while running uwrmaxsat on {errcnf}"
-                #                   f"\nrc: {err.returncode}, check {errfilename}")
-                print(f"error while running uwrmaxsat on {errcnf}"
-                      f"\nrc: {err.returncode}, check {errfilename}")
-                raise NoSolutionException("nonzero returncode")
-        else:
-            #raise RuntimeError(f"error while running uwrmaxsat on {errcnf}"
-            #                   f"\nrc: {err.returncode}, no stdout captured")
-            print(f"error while running uwrmaxsat on {errcnf}"
-                  f"\nrc: {err.returncode}, no stdout captured")
-            raise NoSolutionException("nonzero returncode")
-    else:  # if no error while maxsat solving
-        runtime = now() - start
-        output = proc.stdout
-        model = read_model(output)
-        dec = TwbnDecoder(enc, -1, model, "")
-        elim_order = dec.get_elim_order()
-        # enc.show_counters(model, elim_order)
-        tri = dec.get_triangulated().to_undirected()
-        td = TreeDecomposition(tri, elim_order, width=-1)
-        pos = graphviz_layout(dec.get_triangulated(), prog='dot')
-        nx.draw(dec.get_triangulated(), pos, with_labels=True)
-        plt.show()
-        td.draw()
-        return td
-
-
-COMPLEXITY_WIDTH = 10
-
-
-def get_weights(domain_sizes):
-    return {node: int(ceil(log2(size))) for node, size in domain_sizes.items()}
+    proc = subprocess.run(cmd, universal_newlines=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    runtime = now() - start
+    output = proc.stdout
+    model = read_model(output)
+    dec = TwbnDecoder(enc, -1, model, "")
+    elim_order = dec.get_elim_order()
+    # enc.show_counters(model, elim_order)
+    tri = dec.get_triangulated().to_undirected()
+    td = TreeDecomposition(tri, elim_order, width=-1)
+    pos = graphviz_layout(dec.get_triangulated(), prog='dot')
+    nx.draw(dec.get_triangulated(), pos, with_labels=True)
+    plt.show()
+    td.draw()
+    return td
 
 
 if __name__ == '__main__':
     import networkx as nx
     import random
+    from berg_encoding import TwbnDecoder
     SEED = 3
     if len(sys.argv) >= 2:
         SEED = int(sys.argv[1])
@@ -164,7 +141,7 @@ if __name__ == '__main__':
     g = nx.fast_gnp_random_graph(5, p=0.5, seed=SEED)
     ds = {node: random.randint(2,16) for node in g.nodes}
     print("ds:", ds)
-    weights = get_weights(ds)
+    weights = weights_from_domain_sizes(ds)
 
     # g.remove_edge(0, 3)
     # g.add_edge(0, 4)

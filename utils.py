@@ -1,4 +1,5 @@
 #!/bin/python3.6
+from math import ceil, log2
 
 import networkx as nx
 import itertools
@@ -171,17 +172,31 @@ def get_domain_sizes(filename: str) -> Dict[int, int]:
         return dict(zip(range(num_vars), domain_sizes))
 
 
-def compute_complexities(td: 'TreeDecomposition', domain_sizes: Dict[int, int]) \
-        -> Dict[int, int]:
+def weight_from_domain_size(domain_size):
+    return ceil(log2(domain_size))
+
+
+def weights_from_domain_sizes(domain_sizes):
+    return {node: weight_from_domain_size(size) for node, size in domain_sizes.items()}
+
+
+def compute_complexities(td: 'TreeDecomposition', domain_sizes: Dict[int, int],
+                         approx = False) -> Dict[int, int]:
+    values = weights_from_domain_sizes(domain_sizes) if approx else domain_sizes
+    reducer = int.__add__ if approx else int.__mul__
     complexities: Dict[int, int] = dict()
     for bag_idx, bag in td.bags.items():
-        complexity = reduce(lambda a,b: a*b, (domain_sizes[var] for var in bag))
+        complexity = reduce(reducer, (values[var] for var in bag))
         complexities[bag_idx] = complexity
     return complexities
 
 
-def compute_complexity_width(td: 'TreeDecomposition', domain_sizes: Dict[int, int]):
-    return max(compute_complexities(td, domain_sizes).values())
+def compute_complexity_width(td: 'TreeDecomposition', domain_sizes: Dict[int, int],
+                             approx=False, include=None) -> int:
+    if include is not None:
+        return max(val for bag_idx, val in compute_complexities(td, domain_sizes, approx).items()
+                   if bag_idx in include)
+    return max(compute_complexities(td, domain_sizes, approx).values())
 
 
 def log_bag_metrics(td: 'TreeDecomposition', domain_sizes: Dict[int, int], append=False):
