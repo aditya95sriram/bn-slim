@@ -4,10 +4,12 @@ from math import ceil, log2
 import networkx as nx
 import itertools
 import random
-from typing import Union, Tuple, Dict, List, Iterator, FrozenSet, TextIO, Set
+from typing import Union, Tuple, Dict, List, Iterator, FrozenSet, TextIO, Set, \
+    Any
 import sys, os
 from operator import itemgetter
 from functools import reduce
+from collections import OrderedDict
 
 import matplotlib.pyplot as plt
 from networkx.drawing.nx_agraph import graphviz_layout
@@ -43,6 +45,23 @@ def posdict_to_ordering(positions: dict):
     for elem, pos in positions.items():
         ordering[pos] = elem
     return ordering
+
+
+def replicate(d: OrderedDict):
+    """
+    convert a dict with (element, count) into a list
+    with each element replicated count many times
+    """
+    l = []
+    for element, count in d.items():
+        l.extend([element]*count)
+    return l
+
+
+def shuffled(l):
+    s = [e for e in l]
+    random.shuffle(s)
+    return s
 
 
 # i/o utility functions
@@ -173,7 +192,9 @@ def get_domain_sizes(filename: str) -> Dict[int, int]:
 
 
 def weight_from_domain_size(domain_size):
-    return ceil(log2(domain_size))
+    # return ceil(log2(domain_size))
+    # return ceil(2*log2(domain_size))
+    return log2(domain_size)
 
 
 def weights_from_domain_sizes(domain_sizes):
@@ -183,7 +204,11 @@ def weights_from_domain_sizes(domain_sizes):
 def compute_complexities(td: 'TreeDecomposition', domain_sizes: Dict[int, int],
                          approx = False) -> Dict[int, int]:
     values = weights_from_domain_sizes(domain_sizes) if approx else domain_sizes
-    reducer = int.__add__ if approx else int.__mul__
+    if approx:
+        reducer = lambda x,y: x+y
+    else:
+        reducer = lambda x,y: x*y
+    # reducer = int.__add__ if approx else int.__mul__
     complexities: Dict[int, int] = dict()
     for bag_idx, bag in td.bags.items():
         complexity = reduce(reducer, (values[var] for var in bag))

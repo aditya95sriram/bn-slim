@@ -5,13 +5,14 @@ import os
 import sys
 import networkx as nx
 import random
-from typing import Dict, List, Tuple, Set, FrozenSet, Callable
+from typing import Dict, List, Tuple, Set, FrozenSet, Callable, Optional
 from pprint import pprint
 from time import sleep, time as now
 import argparse
 import signal
 from collections import Counter
 from operator import itemgetter
+from functools import reduce
 import statistics
 
 # internal
@@ -19,7 +20,7 @@ from blip import run_blip, BayesianNetwork, TWBayesianNetwork, monitor_blip, \
     parse_res, start_blip_proc, check_blip_proc, stop_blip_proc
 from utils import TreeDecomposition, pick, pairs, filter_read_bn, BNData, NoSolutionException,\
     get_domain_sizes, log_bag_metrics, compute_complexity_width, weight_from_domain_size, \
-    compute_complexities
+    compute_complexities, shuffled
 from berg_encoding import solve_bn, PSET_ACYC
 
 # optional
@@ -47,15 +48,37 @@ START_WITH = None
 RELAXED_PARENTS = False
 TRAV_STRAT = "random"
 MIMIC = False
-DOMAIN_SIZES: Dict[int, int] = dict()
+DOMAIN_SIZES: Dict[int, int] = None
 USE_COMPLEXITY_WIDTH = False
+USING_COMPLEXITY_WIDTH = False
+COMPLEXITY_BOUND = -1
+CW_TARGET_REACHED = False
+CW_TRAV_STRAT = "max-rand"
 
 
 def find_start_bag(td: TreeDecomposition, history: Counter = None, debug=False):
-    if USE_COMPLEXITY_WIDTH:  # pick bag with highest complexity
+    if USING_COMPLEXITY_WIDTH:  # pick bag with highest complexity
         complexities = compute_complexities(td, DOMAIN_SIZES)
-        maxbagidx, _ = max(complexities.items(), key=itemgetter(1))
-        return maxbagidx
+        if CW_TRAV_STRAT == "max":
+            bag_order = sorted(complexities, key=complexities.get, reverse=True)
+        elif CW_TRAV_STRAT == "max-min":
+            bag_order = sorted(complexities, key=complexities.get,
+                               reverse=not CW_TARGET_REACHED)
+        else:  # max-rand or tw-max-rand
+            if CW_TARGET_REACHED:
+                bag_order = shuffled(complexities.keys())
+            else:
+                bag_order = sorted(complexities, key=complexities.get, reverse=True)
+        mincount = min(history.values())
+        for bag_id in bag_order:
+            if history[bag_id] == mincount:
+                return bag_id
+        # maxbagidx, _ = max(complexities.items(), key=itemgetter(1))
+        # if history[maxbagidx] == 0:
+        #     return maxbagidx
+        # else:  # cw target already met, return random bag
+        #     print("randomly picking bag:", end="")
+        #     return pick(td.bags.keys())
     elif TRAV_STRAT == "random":  # randomly pick a bag
         return pick(td.bags.keys())
     else:  # pick bag with least count and earliest in order
@@ -132,6 +155,12 @@ def prepare_subtree(bn: TWBayesianNetwork, bag_ids: set, seen: set, debug=False)
         for nbr_id, intersection in nbrs.items():
             boundary_nodes.update(intersection)
             forced_cliques[nbr_id] = intersection
+            if USING_COMPLEXITY_WIDTH and intersection:
+                clique_cw = reduce(lambda x, y: x * y, map(DOMAIN_SIZES.get, intersection))
+                if clique_cw >= COMPLEXITY_BOUND:
+                    if debug: print(" skipping because marker clique exceeds cw bound")
+                    SOLUTION.skipped += 1
+                    return None
     if debug: print("clique sets:", [set(c) for c in forced_cliques.values()])
 
     # compute forced arc data for leaf nodes
@@ -202,7 +231,7 @@ def compute_max_score(data: BNData, bn: BayesianNetwork) -> float:
 
 
 METRICS = ("start_score", "num_passes", "num_improvements", "skipped",
-           "nosolution", "restarts")
+           "nosolution", "restarts", "start_width")
 
 
 class Solution(object):
@@ -214,7 +243,7 @@ class Solution(object):
         self.logger = None
         # for code completion
         self.start_score = self.num_passes = self.num_improvements = \
-        self.skipped = self.nosolution = self.restarts = 0
+        self.skipped = self.nosolution = self.restarts = self.start_width = 0
         # set proper value for logger now
         self.logger = logger
 
@@ -262,13 +291,15 @@ SOLUTION = Solution()  # placeholder global solution variable
 def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT,
              history: Counter = None, width_bound: int = None, debug=False):
     td = bn.td
-    if USE_COMPLEXITY_WIDTH:
+    if USING_COMPLEXITY_WIDTH:
         final_width_bound = weight_from_domain_size(width_bound)
     else:
         final_width_bound = width_bound
     selected, seen = find_subtree(td, budget, history, debug=False)
     history.update(selected)
-    forced_arcs, forced_cliques, data, pset_acyc = prepare_subtree(bn, selected, seen, debug)
+    prep_tuple = prepare_subtree(bn, selected, seen, debug)
+    if prep_tuple is None: return
+    forced_arcs, forced_cliques, data, pset_acyc = prep_tuple
     # if debug:
     #     print("filtered data:-")
     #     pprint(data)
@@ -281,7 +312,7 @@ def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT
     cur_offset = sum(bn.offsets[node] for node in seen)
     if debug: print(f"potential max: {(max_score - cur_offset)/bn.best_norm_score:.5f}", end="")
     if (max_score - cur_offset)/bn.best_norm_score <= LAZY_THRESHOLD:
-        if debug: print(" skipping ####")
+        if debug: print(" skipping because lazy threshold not met")
         SOLUTION.skipped += 1
         return
     pos = dict()  # placeholder layout
@@ -296,7 +327,7 @@ def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT
     if debug:
         print("old parents:-")
         pprint({node: par for node, par in bn.parents.items() if node in seen})
-    domain_sizes = DOMAIN_SIZES if USE_COMPLEXITY_WIDTH else None
+    domain_sizes = DOMAIN_SIZES if USING_COMPLEXITY_WIDTH else None
     try:
         replbn = solve_bn(data, final_width_bound, bn.input_file, forced_arcs, forced_cliques,
                           pset_acyc, timeout, domain_sizes, debug)
@@ -325,7 +356,7 @@ def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT
     new_acw = compute_complexity_width(replbn.td, DOMAIN_SIZES, approx=True)
     print(f"old: {old_cw}|{old_acw}\tnew: {new_cw}|{new_acw}")
     # replacement criterion
-    if USE_COMPLEXITY_WIDTH:
+    if USING_COMPLEXITY_WIDTH and old_cw > width_bound:
         if new_cw > width_bound:
             return False
     else:
@@ -341,6 +372,7 @@ def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT
 def slim(filename: str, start_treewidth: int, budget: int = BUDGET,
          sat_timeout: int = TIMEOUT, max_passes=MAX_PASSES, max_time: int = MAX_TIME,
          heuristic=HEURISTIC, offset: int = OFFSET, seed=SEED, debug=False):
+    global USING_COMPLEXITY_WIDTH, COMPLEXITY_BOUND, CW_TARGET_REACHED
     start = now()
     def elapsed(): return f"(after {now()-start:.1f} s.)"
     heur_proc = outfile = None  # placeholder
@@ -370,6 +402,7 @@ def slim(filename: str, start_treewidth: int, budget: int = BUDGET,
     print(f"start cw: {start_cw}\tacw:{start_acw}")
     if USE_COMPLEXITY_WIDTH:
         print(f"setting complexity bound: {complexity_bound}|{weight_from_domain_size(complexity_bound)}")
+        COMPLEXITY_BOUND = complexity_bound
     SOLUTION.update(bn)
     if DOMAIN_SIZES: log_bag_metrics(bn.td, DOMAIN_SIZES)
     if LAZY_THRESHOLD > 0:
@@ -378,10 +411,13 @@ def slim(filename: str, start_treewidth: int, budget: int = BUDGET,
     prev_score = bn.score
     print(f"Starting score: {prev_score:.5f}")
     SOLUTION.start_score = prev_score
+    SOLUTION.start_width = start_cw
     history = Counter(dict.fromkeys(bn.td.decomp.nodes, 0))
     if seed: random.seed(seed)
     for i in range(max_passes):
-        width_bound = complexity_bound if USE_COMPLEXITY_WIDTH else start_treewidth
+        if USE_COMPLEXITY_WIDTH:
+            USING_COMPLEXITY_WIDTH = i >= 10 or CW_TRAV_STRAT != "tw-max-rand"
+        width_bound = complexity_bound if USING_COMPLEXITY_WIDTH else start_treewidth
         replaced = slimpass(bn, budget, sat_timeout, history, width_bound, debug=False)
         SOLUTION.num_passes += 1
         new_score = bn.score
@@ -392,6 +428,8 @@ def slim(filename: str, start_treewidth: int, budget: int = BUDGET,
             SOLUTION.num_improvements += 1
         elif replaced:
             print("*** No improvement, but replacement performed ***")
+            prev_score = new_score
+            SOLUTION.update(bn)
         if MIMIC:
             heur_score = check_blip_proc(heur_proc, debug=False)
             if heur_score > bn.score:
@@ -406,7 +444,13 @@ def slim(filename: str, start_treewidth: int, budget: int = BUDGET,
                 SOLUTION.update(bn)
                 # reset history because fresh tree decomposition
                 history = Counter(dict.fromkeys(bn.td.decomp.nodes, 0))
-        if debug: print(f"* Iteration {i}:\t{bn.score:.5f} {elapsed()}")
+        current_cw = compute_complexity_width(bn.td, DOMAIN_SIZES)
+        if current_cw <= width_bound and not CW_TARGET_REACHED:
+            if USING_COMPLEXITY_WIDTH and CW_TRAV_STRAT in ["max-min", "max-rand", "tw-max-rand"]:
+                print("*** cw target reached, flipping strategy ***")
+            CW_TARGET_REACHED = True
+        if debug and USE_COMPLEXITY_WIDTH: print("current cw:", current_cw)
+        if debug: print(f"* Iteration {i}:\t{bn.score:.5f} {elapsed()}\n")
         if now()-start > max_time:
             if debug: print("time limit exceeded, quitting")
             break
@@ -445,6 +489,9 @@ def wandb_configure(wandb: wandb, args):
     wandb.config.traversal = args.traversal_strategy
     wandb.config.relaxed = int(args.relaxed_parents)
     wandb.config.mimic = int(args.mimic)
+    wandb.config.datfile = args.datfile
+    wandb.config.complexity_width = args.complexity_width
+    wandb.config.cw_strategy = args.cw_strategy
     # process config
     wandb.config.platform = "cluster" if CLUSTER else "workstation"
     wandb.config.jobid = os.environ.get("MY_JOB_ID", -1)
@@ -484,12 +531,16 @@ parser.add_argument("-d", "--datfile", help="path to datfile, if omitted,"
 parser.add_argument("-w", "--complexity-width", action="store_true",
                     help="minimizing complexity width becomes main objective\n"
                          "[requires option -d|--datfile]")
+parser.add_argument("--cw-strategy", default=CW_TRAV_STRAT,
+                    choices=["max", "max-rand", "max-min", "tw-max-rand"],
+                    help="complexity width reduction traversal strategy\n"
+                         "[ignored if option -w|--complexity width not provided]")
 parser.add_argument("-r", "--random-seed", type=int, default=SEED,
                     help="random seed (set 0 for no seed)")
 parser.add_argument("-l", "--logging", action="store_true", help="wandb logging")
 parser.add_argument("--project-name", default="twbnslim-test", help="wandb project name")
 parser.add_argument("--start-with", default=None,
-                    help="optionally skip heuristic and start with this solution")
+                    help="optionally skip running heuristic and start with this solution")
 parser.add_argument("-v", "--verbose", action="store_true", help="verbose mode")
 
 if __name__ == '__main__':
@@ -498,11 +549,12 @@ if __name__ == '__main__':
     LAZY_THRESHOLD = args.lazy_threshold
     RELAXED_PARENTS = args.relaxed_parents
     MIMIC = args.mimic
-    if args.datfile: DOMAIN_SIZES = get_domain_sizes(args.datfile)
+    DOMAIN_SIZES = get_domain_sizes(args.datfile) if args.datfile else None
     if args.complexity_width:
         USE_COMPLEXITY_WIDTH = True
         if DOMAIN_SIZES is None:
             parser.error("--complexity-width requires --datfile")
+    CW_TRAV_STRAT = args.cw_strategy
     if args.budget <= args.treewidth:
         print("budget smaller than treewidth bound, quitting")
         sys.exit()
@@ -521,7 +573,8 @@ if __name__ == '__main__':
     # if comparison requested, compare then exit
     if args.compare:
         monitor_blip(filepath, args.treewidth, logger, timeout=args.max_time,
-                     seed=args.random_seed, solver=args.heuristic, debug=args.verbose)
+                     seed=args.random_seed, solver=args.heuristic,
+                     domain_sizes=DOMAIN_SIZES, debug=args.verbose)
         sys.exit()
 
     register_handler()

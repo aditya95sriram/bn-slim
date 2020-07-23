@@ -7,7 +7,8 @@ import random
 from typing import Optional, Callable
 import re
 
-from utils import filled_in, TreeDecomposition, pairs, stream_bn, get_bn_stats, filter_read_bn
+from utils import filled_in, TreeDecomposition, pairs, stream_bn, get_bn_stats, \
+    filter_read_bn, compute_complexity_width, get_domain_sizes
 
 import matplotlib.pyplot as plt
 from networkx.drawing.nx_agraph import pygraphviz_layout
@@ -176,7 +177,7 @@ def run_blip(filename, treewidth, outfile="temp.res", timeout=10, seed=0,
 
 
 def monitor_blip(filename, treewidth, logger: Callable, outfile="temp.res",
-                 timeout=10, seed=0, solver="kg", debug=False):
+                 timeout=10, seed=0, solver="kg", domain_sizes=None, debug=False):
     basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"),
                f"solver.{solver}", "-v", "1"]
     args = ["-j", filename, "-w", str(treewidth), "-r", outfile,
@@ -189,8 +190,12 @@ def monitor_blip(filename, treewidth, logger: Callable, outfile="temp.res",
             if debug: print("got line:", line, end='')
             match = SCORE_PATN.match(line)
             if match:
+                if domain_sizes is not None:
+                    bn = parse_res(filename, treewidth, outfile)
+                    cw = compute_complexity_width(bn.td, domain_sizes)
+                    acw = compute_complexity_width(bn.td, domain_sizes, approx=True)
                 score = float(match['score'])
-                logger({"score": score})
+                logger({"score": score, "width": cw, "approx_width": acw})
     print(f"done returncode: {proc.returncode}")
 
 

@@ -255,6 +255,7 @@ def solve_bn(data: BNData, treewidth: int, input_file: str, forced_arcs=None,
         else:
             enc = CwbnEncoding(data, cnffile, forced_arcs, forced_cliques,
                                pset_acyc, debug)
+            enc.use_dd = True
             enc.set_weights(weights_from_domain_sizes(domain_sizes))
         enc.encode_sat(treewidth)
     if debug: print("encoding done")
@@ -291,9 +292,7 @@ def solve_bn(data: BNData, treewidth: int, input_file: str, forced_arcs=None,
 
 
 class CwbnEncoding(TwbnEncoding, SvEncodingWithComplexity):
-
-    def set_weights(self, weights):
-        self.weights = weights
+    pass
 
 
 if __name__ == '__main__':
