@@ -211,6 +211,8 @@ class Solution(object):
     def update(self, new_value):
         if self.logger is not None:
             self.logger({'score': new_value.score})
+            if new_value.score - 10 > self.start_score:
+                self.logger({'extremely_strong': True})
         self.value = new_value
 
 
@@ -481,6 +483,8 @@ if __name__ == '__main__':
             success_rate = SOLUTION.num_improvements / (SOLUTION.num_passes - SOLUTION.skipped)
             if args.logging:
                 wandb.log({"success_rate": success_rate})
+                if SOLUTION.num_improvements > 0:
+                    wandb.log({"improved": True})
             else:
                 print("final metrics:")
                 pprint(SOLUTION.data)
