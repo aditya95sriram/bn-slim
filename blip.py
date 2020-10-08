@@ -145,8 +145,9 @@ def parse_res(filename, treewidth, outfile, debug=False) -> TWBayesianNetwork:
             if not line.strip():
                 continue
             elif line.startswith("Score:"):
-                continue
-            if line.startswith("elim-order:"):
+                score = float(line.split()[1].strip())
+                break
+            elif line.startswith("elim-order:"):
                 elim_order = line.split()[1].strip("()").split(",")
                 bn.elim_order = list(map(int, elim_order))
                 if debug: print("elim-order:", bn.elim_order)
@@ -162,7 +163,40 @@ def parse_res(filename, treewidth, outfile, debug=False) -> TWBayesianNetwork:
                 bn.add(int(vertex), map(int, parents))
                 if debug: print(f"v:{vertex}, sc:{local_score}, par:{parents})")
     bn.done()
+    bn._score = score
     return bn
+
+
+def write_res(bn: BayesianNetwork, outfile, write_elim_order=False, debug=False):
+    nodes = sorted(bn.dag.nodes())
+    scores = bn.compute_all_scores()
+    with open(outfile, "w") as out:
+        if write_elim_order and isinstance(bn, TWBayesianNetwork):
+            elim_order = bn.td.recompute_elim_order()
+            out.write(f"elim-order: ({','.join(map(str, elim_order))})\n")
+        for node in nodes:
+            parents = bn.parents[node]
+            pstr = ""
+            if parents:
+                pstr = " (" + ",".join(map(str, parents)) + ")"
+            out.write(f"{node}: {scores[node]:.2f} {pstr}\n")
+        out.write(f"\nScore: {bn.compute_score():.3f}\n")
+
+
+def write_net(bn: BayesianNetwork, datfile, tempprefix="lltemp", debug=False):
+    resfile = f"{tempprefix}.res"
+    netfile = f"{tempprefix}.net"
+    write_res(bn, resfile)
+    basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"), "parle"]
+    args = ["-d", datfile, "-r", resfile, "-n", netfile]
+    cmd = basecmd + args
+    if debug: print("running parle, cmd:", cmd)
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE)
+    if proc.returncode == 0:  # success
+        if debug: print("file generated:", netfile)
+    else:  # error
+        print("error encountered during 'parle', returncode:", proc.returncode)
+        return None
 
 
 def run_blip(filename, treewidth, outfile="temp.res", timeout=10, seed=0,
