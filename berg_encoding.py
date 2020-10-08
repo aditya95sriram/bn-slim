@@ -259,6 +259,8 @@ def solve_bn(data: BNData, treewidth: int, input_file: str, forced_arcs=None,
             enc.set_weights(weights_from_domain_sizes(domain_sizes))
         enc.encode_sat(treewidth)
     if debug: print("encoding done")
+    if debug: print(f"maxsat stats: {len(enc.vars)} vars, {enc.num_clauses} clauses")
+    #sys.exit()
     base_cmd = [os.path.join(SOLVER_DIR, "uwrmaxsat"), "-m", "-v0"]
     cmd = base_cmd + [cnfpath, f"-cpu-lim={timeout}"]
     start = now()

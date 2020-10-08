@@ -135,7 +135,7 @@ class SvEncodingWithComplexity(SvEncoding):
                 self.encode_single_cardinality_with_dd(bound - self.weights[node], varcounts)
             else:
                 self.encode_single_cardinality(bound - self.weights[node], varcounts)
-        print("#cardinality clauses:", self.num_clauses - old)
+        #print("#cardinality clauses:", self.num_clauses - old)
 
     def debug_counters(self, model, elim_order):
         if not self.debug: return
