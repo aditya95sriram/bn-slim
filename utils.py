@@ -390,6 +390,10 @@ class TreeDecomposition(object):
             else:
                 raise AssertionError(f"edge {edge} not covered by decomp")
             continue
+        new_elim_order = self.recompute_elim_order()
+        fgraph, max_degree = filled_in(graph, new_elim_order)
+        assert max_degree <= self.width, f"newly computed elim order invalid" \
+                                         f"{max_degree} > {self.width}"
 
     def get_boundary_intersections(self, selected) -> Dict[int, Dict[int, frozenset]]:
         intersections = {bag_id: dict() for bag_id in selected}
@@ -458,6 +462,21 @@ class TreeDecomposition(object):
             if bag.issuperset(members):
                 return bag_id
         return -1
+
+    def recompute_elim_order(self) -> list:
+        """
+        recomputes elimination ordering based on possibly modified
+        decomposition bags
+
+        :return: new elim_order as list
+        """
+        rootbag = first(self.bags)  # arbitrarily choose a root bag
+        elim_order = list(self.bags[rootbag])  # initialize eo with rootbag
+        for u, v in nx.dfs_edges(self.decomp, source=rootbag):
+            forgotten = self.bags[v] - self.bags[u]
+            elim_order.extend(forgotten)
+        elim_order.reverse()
+        return elim_order
 
 
 if __name__ == '__main__':
