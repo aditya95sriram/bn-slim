@@ -124,9 +124,10 @@ class TWBayesianNetwork(BayesianNetwork):
         if self.tw <= 0:
             self.tw = self.td.width
 
-    def verify(self):
+    def verify(self, verify_treewidth=True):
         super().verify()
-        self.td.verify(graph=self.get_moralized())
+        if verify_treewidth:
+            self.td.verify(graph=self.get_moralized())
 
     def get_triangulated(self, elim_order=None):
         if elim_order is None: elim_order = self.elim_order
@@ -197,11 +198,17 @@ def monitor_blip(filename, treewidth, logger: Callable, outfile="temp.res",
                 score = float(match['score'])
                 logdata = {"score": score}
                 if domain_sizes is not None:
-                    bn = parse_res(filename, treewidth, outfile)
-                    cw = compute_complexity_width(bn.td, domain_sizes)
-                    acw = compute_complexity_width(bn.td, domain_sizes, approx=True)
-                score = float(match['score'])
-                logger({"score": score, "width": cw, "approx_width": acw})
+                    try:
+                        bn = parse_res(filename, treewidth, outfile)
+                    except IndexError:
+                        print("bn res file invalid (probably got overwritten)")
+                        cw = acw = -1
+                    else:
+                        cw = compute_complexity_width(bn.td, domain_sizes)
+                        acw = compute_complexity_width(bn.td, domain_sizes, approx=True)
+                        logdata["width"] = cw
+                        logdata["approx_width"] = acw
+                logger(logdata)
     print(f"done returncode: {proc.returncode}")
 
 

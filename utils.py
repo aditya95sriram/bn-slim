@@ -196,6 +196,15 @@ def get_domain_sizes(filename: str) -> Dict[int, int]:
         return dict(zip(range(num_vars), domain_sizes))
 
 
+def get_vardata(filename: str) -> OrderedDict:
+    with open(filename, 'r') as datfile:
+        names = datfile.readline().strip().split()
+        domain_sizes = [int(ds) for ds in datfile.readline().strip().split()]
+        return OrderedDict(zip(names, domain_sizes))
+
+
+# complexity width related function
+
 def weight_from_domain_size(domain_size):
     # return ceil(log2(domain_size))
     # return ceil(2*log2(domain_size))
@@ -206,8 +215,18 @@ def weights_from_domain_sizes(domain_sizes):
     return {node: weight_from_domain_size(size) for node, size in domain_sizes.items()}
 
 
+def compute_complexity(bag: Union[Set, FrozenSet], domain_sizes: Dict[int, int],
+                       approx=False) -> int:
+    values = weights_from_domain_sizes(domain_sizes) if approx else domain_sizes
+    if approx:
+        reducer = lambda x, y: x+y
+    else:
+        reducer = lambda x, y: x*y
+    return reduce(reducer, (values[var] for var in bag))
+
+
 def compute_complexities(td: 'TreeDecomposition', domain_sizes: Dict[int, int],
-                         approx = False) -> Dict[int, int]:
+                         approx=False) -> Dict[int, int]:
     values = weights_from_domain_sizes(domain_sizes) if approx else domain_sizes
     if approx:
         reducer = lambda x,y: x+y

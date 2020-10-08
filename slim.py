@@ -13,6 +13,7 @@ import signal
 from collections import Counter
 from operator import itemgetter
 from functools import reduce
+from heapq import heappop, heappush
 import statistics
 
 # internal
@@ -20,7 +21,7 @@ from blip import run_blip, BayesianNetwork, TWBayesianNetwork, monitor_blip, \
     parse_res, start_blip_proc, check_blip_proc, stop_blip_proc
 from utils import TreeDecomposition, pick, pairs, filter_read_bn, BNData, NoSolutionException,\
     get_domain_sizes, log_bag_metrics, compute_complexity_width, weight_from_domain_size, \
-    compute_complexities, shuffled
+    compute_complexity, compute_complexities, shuffled
 from berg_encoding import solve_bn, PSET_ACYC
 
 # optional
@@ -49,11 +50,14 @@ RELAXED_PARENTS = False
 TRAV_STRAT = "random"
 MIMIC = False
 DOMAIN_SIZES: Dict[int, int] = None
+DATFILE = ""
 USE_COMPLEXITY_WIDTH = False
 USING_COMPLEXITY_WIDTH = False
 COMPLEXITY_BOUND = -1
 CW_TARGET_REACHED = False
-CW_TRAV_STRAT = "max-rand"
+CW_TRAV_STRAT = "max-rand"  # one of max, max-min, max-rand, tw-max-rand
+CW_EXP_STRAT = "min-int"  # one of max, min, min-int
+SAVE_AS = ""  # pattern to use while saving networks
 
 
 def find_start_bag(td: TreeDecomposition, history: Counter = None, debug=False):
@@ -69,7 +73,7 @@ def find_start_bag(td: TreeDecomposition, history: Counter = None, debug=False):
                 bag_order = shuffled(complexities.keys())
             else:
                 bag_order = sorted(complexities, key=complexities.get, reverse=True)
-        mincount = min(history.values())
+        mincount = min(history[bag_id] for bag_id in bag_order)
         for bag_id in bag_order:
             if history[bag_id] == mincount:
                 return bag_id
@@ -110,10 +114,10 @@ def find_subtree(td: TreeDecomposition, budget: int, history: Counter = None,
     selected = {start_bag_id}
     seen = set(td.bags[start_bag_id])
     if debug: print(f"starting bag {start_bag_id}: {td.bags[start_bag_id]}")
-    queue = [start_bag_id]
+    queue = [(0, start_bag_id)]  # (sorting metric, bag_id)
     visited = set()
     while queue:
-        bag_id = queue.pop(0)
+        _, bag_id = heappop(queue)
         visited.add(bag_id)
         bag = td.bags[bag_id]
         if len(seen.union(bag)) > budget:
@@ -124,7 +128,18 @@ def find_subtree(td: TreeDecomposition, budget: int, history: Counter = None,
             # add neighboring bags to queue
             for nbr_id in td.decomp.neighbors(bag_id):
                 if nbr_id not in visited:
-                    queue.append(nbr_id)
+                    nbr_bag = td.bags[nbr_id]
+                    if not USING_COMPLEXITY_WIDTH:
+                        expansion_metric = 0  # no sorting, so set same value for all bags
+                        # todo[feature]: set to random value to randomize expansion
+                    else:
+                        if CW_EXP_STRAT == "max":
+                            expansion_metric = -compute_complexity(nbr_bag, DOMAIN_SIZES)
+                        elif CW_EXP_STRAT == "min":
+                            expansion_metric = compute_complexity(nbr_bag, DOMAIN_SIZES)
+                        else:
+                            expansion_metric = bag.intersection(nbr_bag)
+                    heappush(queue, (expansion_metric, nbr_id))
             if debug: print(f"added bag {bag_id}: {td.bags[bag_id]}")
     if debug: print(f"final seen: {seen}")
     return selected, seen
@@ -337,22 +352,25 @@ def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT
         print("new parents:-")
         pprint(replbn.parents)
     if debug: print(f"score change: {old_score:.3f} -> {new_score:.3f}")
-    old_cw = compute_complexity_width(td, DOMAIN_SIZES, include=selected)
-    new_cw = compute_complexity_width(replbn.td, DOMAIN_SIZES)
-    old_acw = compute_complexity_width(td, DOMAIN_SIZES, include=selected, approx=True)
-    new_acw = compute_complexity_width(replbn.td, DOMAIN_SIZES, approx=True)
-    print(f"old: {old_cw}|{old_acw}\tnew: {new_cw}|{new_acw}")
+    if USE_COMPLEXITY_WIDTH:
+        old_cw = compute_complexity_width(td, DOMAIN_SIZES, include=selected)
+        new_cw = compute_complexity_width(replbn.td, DOMAIN_SIZES)
+        old_acw = compute_complexity_width(td, DOMAIN_SIZES, include=selected, approx=True)
+        new_acw = compute_complexity_width(replbn.td, DOMAIN_SIZES, approx=True)
+        print(f"old: {old_cw}|{old_acw}\tnew: {new_cw}|{new_acw}")
     # replacement criterion
     if USING_COMPLEXITY_WIDTH and old_cw > width_bound:
         if new_cw > width_bound:
             return False
-    else:
-        if new_score < old_score:
-            return False
+    elif USING_COMPLEXITY_WIDTH and new_score == old_score and new_cw > old_cw:
+        return False
+    elif new_score < old_score:  # in case not using cw, then this is the only check
+        return False
+    print(f"score change: {old_score:.3f} -> {new_score:.3f}, replacing ...")
     td.replace(selected, forced_cliques, replbn.td)
     # update bn with new bn
     bn.replace(replbn)
-    if __debug__: bn.verify()
+    if __debug__: bn.verify(verify_treewidth=not USING_COMPLEXITY_WIDTH)
     return True
 
 
@@ -386,11 +404,11 @@ def slim(filename: str, start_treewidth: int, budget: int = BUDGET,
             bn = run_blip(filename, start_treewidth, timeout=offset, seed=seed,
                           solver=heuristic)
     if __debug__: bn.verify()
-    start_cw = compute_complexity_width(bn.td, DOMAIN_SIZES)
-    start_acw = compute_complexity_width(bn.td, DOMAIN_SIZES, approx=True)
-    complexity_bound = start_cw//2  # todo[opt]: maybe use weight as bound?
-    print(f"start cw: {start_cw}\tacw:{start_acw}")
     if USE_COMPLEXITY_WIDTH:
+        start_cw = compute_complexity_width(bn.td, DOMAIN_SIZES)
+        start_acw = compute_complexity_width(bn.td, DOMAIN_SIZES, approx=True)
+        complexity_bound = start_cw // 2  # todo[opt]: maybe use weight as bound?
+        print(f"start cw: {start_cw}\tacw:{start_acw}")
         print(f"setting complexity bound: {complexity_bound}|{weight_from_domain_size(complexity_bound)}")
         COMPLEXITY_BOUND = complexity_bound
     SOLUTION.update(bn)
@@ -402,7 +420,7 @@ def slim(filename: str, start_treewidth: int, budget: int = BUDGET,
     print(f"Starting score: {prev_score:.5f}")
     #if debug and DATFILE: print(f"Starting LL: {eval_ll(bn, DATFILE):.6f}")
     SOLUTION.start_score = prev_score
-    SOLUTION.start_width = start_cw
+    if USE_COMPLEXITY_WIDTH: SOLUTION.start_width = start_cw
     history = Counter(dict.fromkeys(bn.td.decomp.nodes, 0))
     if seed: random.seed(seed)
     for i in range(max_passes):
@@ -435,11 +453,12 @@ def slim(filename: str, start_treewidth: int, budget: int = BUDGET,
                 SOLUTION.update(bn)
                 # reset history because fresh tree decomposition
                 history = Counter(dict.fromkeys(bn.td.decomp.nodes, 0))
-        current_cw = compute_complexity_width(bn.td, DOMAIN_SIZES)
-        if current_cw <= width_bound and not CW_TARGET_REACHED:
-            if USING_COMPLEXITY_WIDTH and CW_TRAV_STRAT in ["max-min", "max-rand", "tw-max-rand"]:
-                print("*** cw target reached, flipping strategy ***")
-            CW_TARGET_REACHED = True
+        if USE_COMPLEXITY_WIDTH:
+            current_cw = compute_complexity_width(bn.td, DOMAIN_SIZES)
+            if current_cw <= width_bound and not CW_TARGET_REACHED:
+                if USING_COMPLEXITY_WIDTH and CW_TRAV_STRAT in ["max-min", "max-rand", "tw-max-rand"]:
+                    print("*** cw target reached, flipping strategy ***")
+                CW_TARGET_REACHED = True
         if debug and USE_COMPLEXITY_WIDTH: print("current cw:", current_cw)
         if debug: print(f"* Iteration {i}:\t{bn.score:.5f} {elapsed()}\n")
         if now() - start > max_time:
@@ -540,6 +559,7 @@ if __name__ == '__main__':
     LAZY_THRESHOLD = args.lazy_threshold
     RELAXED_PARENTS = args.relaxed_parents
     MIMIC = args.mimic
+    DATFILE = args.datfile
     DOMAIN_SIZES = get_domain_sizes(args.datfile) if args.datfile else None
     if args.complexity_width:
         USE_COMPLEXITY_WIDTH = True
@@ -579,7 +599,9 @@ if __name__ == '__main__':
         if SOLUTION.value is None:
             print("no solution computed so far")
         else:
-            SOLUTION.value.verify()  # verify final bn
+            # verify final bn (not required if optimizing complexity width)
+            # todo[req]: complexity width separate verification
+            SOLUTION.value.verify(verify_treewidth=not USE_COMPLEXITY_WIDTH)
             print("verified")
             success_rate = SOLUTION.num_improvements / (SOLUTION.num_passes - SOLUTION.skipped)
             if args.logging:
