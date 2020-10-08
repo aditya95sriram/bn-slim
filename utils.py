@@ -36,6 +36,11 @@ def ord_triples(obj):
     return itertools.permutations(obj, 3)
 
 
+def elem_apply(fns, elems):
+    """apply list of functions to list of elements,
+    element-wise"""
+    return map(lambda a, b: a(b), fns, elems)
+
 def posdict_to_ordering(positions: dict):
     ordering = [-1]*len(positions)
     for elem, pos in positions.items():
@@ -251,7 +256,7 @@ class TreeDecomposition(object):
         graph, max_degree = filled_in(graph, order)
         if width > 0:
             assert max_degree <= width, \
-                f"Treewidth({width}) exceeded by ordering: {order}"
+                f"Treewidth({width}) exceeded by ordering({max_degree}): {order}"
             self.width = width
         else:
             self.width = max_degree

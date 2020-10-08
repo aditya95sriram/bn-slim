@@ -4,7 +4,7 @@ import subprocess
 import os
 import networkx as nx
 import random
-from typing import Optional, Callable
+from typing import Optional, Callable, Dict, List
 import re
 
 from utils import filled_in, TreeDecomposition, pairs, stream_bn, get_bn_stats, filter_read_bn
@@ -29,8 +29,7 @@ class BayesianNetwork(object):
     def _clear_cached(self):
         self._score = self._dag = None
 
-    def compute_score(self, subset: set=None) -> float:
-        """recompute score based on parents sets"""
+    def compute_all_scores(self, subset: set = None) -> Dict[int, float]:
         if self.data is None:
             if subset is None:
                 data = stream_bn(self.input_file, normalize=True)
@@ -38,12 +37,17 @@ class BayesianNetwork(object):
                 data = filter_read_bn(self.input_file, subset, normalize=True).items()
         else:
             data = self.data.items()  # data is assumed to be normalized
-        score = 0
+        scores = dict()
         for node, psets in data:
             if node in self.parents:  # could be a bn with a subset of nodes
                 if subset is None or node in subset:
-                    score += psets[self.parents[node]] + self.offsets[node]
-        return score
+                    scores[node] = psets[self.parents[node]] + self.offsets[node]
+        return scores
+
+    def compute_score(self, subset: set=None) -> float:
+        """recompute score based on parents sets"""
+        scores = self.compute_all_scores(subset)
+        return sum(scores.values())
 
     @property
     def score(self) -> float:
@@ -99,7 +103,7 @@ class TWBayesianNetwork(BayesianNetwork):
     def __init__(self, input_file, tw=0, elim_order=None, td=None, *args, **kwargs):
         super().__init__(input_file, *args, **kwargs)
         self.tw = tw
-        self.elim_order = elim_order
+        self.elim_order: List[int] = elim_order
         self._td: Optional[TreeDecomposition] = td
 
     @property

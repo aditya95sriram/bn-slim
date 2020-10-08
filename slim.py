@@ -29,10 +29,10 @@ if not CLUSTER:
     import matplotlib.pyplot as plt
 
 # score comparison epsilon
-EPSILON = 1e-10
+EPSILON = 1e-7
 
 # default parameter values
-BUDGET = 7
+BUDGET = 10
 TIMEOUT = 5
 MAX_PASSES = 100
 MAX_TIME = 1800
@@ -214,15 +214,6 @@ class Solution(object):
         self.value = new_value
 
 
-def log_potential(old, new, max, offset, best):
-    if CLUSTER: return
-    old = (old - offset)/best
-    new = (new - offset)/best
-    max = (max - offset)/best
-    with open("potentials.csv", "a") as f:
-        f.write(f"{old:.5f},{new:.5f},{max:.5f}\n")
-
-
 def _getter_factory(metric: str):
     def getter(self: Solution):
         return self.data[metric]
@@ -258,7 +249,9 @@ def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT
     old_score = bn.compute_score(seen)
     max_score = compute_max_score(data, bn)
     if RELAXED_PARENTS:
-        assert max_score + EPSILON >= old_score, "max score less than old score"
+        # too strict
+        # assert max_score + EPSILON >= old_score, "max score less than old score"
+        assert round(max_score + EPSILON, 4) >= round(old_score, 4), "max score less than old score"
         if max_score < old_score:
             print("#### max score smaller than old score modulo epsilon")
     cur_offset = sum(bn.offsets[node] for node in seen)
@@ -287,12 +280,6 @@ def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT
         print(f"no solution found by maxsat, skipping (reason: {err})")
         return
     new_score = replbn.compute_score()
-    log_potential(old_score, new_score, max_score, cur_offset, bn.best_norm_score)
-    recorded, potential = new_score-old_score, max_score-old_score
-    if potential == 0:
-        if debug: print("already at potential")
-    else:
-        if debug: print(f"percentage potential matched: {recorded/potential:.2%}")
     if not CLUSTER and debug:
         nx.draw(replbn.dag, pos, with_labels=True)
         plt.suptitle("replacement subdag")
@@ -315,6 +302,9 @@ def slim(filename: str, treewidth: int, budget: int = BUDGET,
     def elapsed(): return f"(after {now()-start:.1f} s.)"
     heur_proc = outfile = None  # placeholder
     if START_WITH is not None:
+        if not os.path.isfile(START_WITH):
+            print(f"specified start-with file doesn't exist, quitting {elapsed()}")
+            return
         if debug: print(f"starting with {START_WITH}, not running heuristic")
         # todo[safety]: handle case when no heuristic solution so far
         bn = parse_res(filename, treewidth, START_WITH)
@@ -340,6 +330,7 @@ def slim(filename: str, treewidth: int, budget: int = BUDGET,
               f"minimum delta required: {bn.best_norm_score*LAZY_THRESHOLD}")
     prev_score = bn.score
     print(f"Starting score: {prev_score:.5f}")
+    #if debug and DATFILE: print(f"Starting LL: {eval_ll(bn, DATFILE):.6f}")
     SOLUTION.start_score = prev_score
     history = Counter(dict.fromkeys(bn.td.decomp.nodes, 0))
     if seed: random.seed(seed)
@@ -401,7 +392,7 @@ def wandb_configure(wandb: wandb, args):
     wandb.config.offset = args.offset
     wandb.config.threshold = args.lazy_threshold
     wandb.config.seed = args.random_seed
-    wandb.config.method = 'heur' if args.compare else 'slim'
+    wandb.config.method = "heur" if args.compare else f"slim_{args.heuristic}"
     wandb.config.traversal = args.traversal_strategy
     wandb.config.relaxed = int(args.relaxed_parents)
     wandb.config.mimic = int(args.mimic)
@@ -424,7 +415,7 @@ parser.add_argument("-p", "--max-passes", type=int, default=MAX_PASSES,
 parser.add_argument("-t", "--max-time", type=int, default=MAX_TIME,
                     help="max time for SLIM to run")
 parser.add_argument("-u", "--heuristic", default=HEURISTIC,
-                    choices=["kg", "ka", "kmax"], help="heuristic solver to use")
+                    choices=["kg", "ka", "kmax", "hc", "hcp"], help="heuristic solver to use")
 parser.add_argument("-o", "--offset", type=int, default=OFFSET,
                     help="duration after which slim takes over")
 parser.add_argument("-c", "--compare", action="store_true",
@@ -453,7 +444,7 @@ if __name__ == '__main__':
     LAZY_THRESHOLD = args.lazy_threshold
     RELAXED_PARENTS = args.relaxed_parents
     MIMIC = args.mimic
-    if args.budget <= args.treewidth:
+    if args.budget <= args.treewidth and not args.compare:
         print("budget smaller than treewidth bound, quitting")
         sys.exit()
     print("not"*__debug__, "running optimized")
