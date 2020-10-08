@@ -18,7 +18,7 @@ import statistics
 
 # internal
 from blip import run_blip, BayesianNetwork, TWBayesianNetwork, monitor_blip, \
-    parse_res, start_blip_proc, check_blip_proc, stop_blip_proc
+    parse_res, start_blip_proc, check_blip_proc, stop_blip_proc, write_res, activate_checkpoints
 from utils import TreeDecomposition, pick, pairs, filter_read_bn, BNData, NoSolutionException,\
     get_domain_sizes, log_bag_metrics, compute_complexity_width, weight_from_domain_size, \
     compute_complexity, compute_complexities, shuffled
@@ -381,6 +381,7 @@ def slim(filename: str, start_treewidth: int, budget: int = BUDGET,
          heuristic=HEURISTIC, offset: int = OFFSET, seed=SEED, debug=False):
     global USING_COMPLEXITY_WIDTH, COMPLEXITY_BOUND, CW_TARGET_REACHED
     start = now()
+    if SAVE_AS: activate_checkpoints(lambda: SOLUTION.value, SAVE_AS)
     def elapsed(): return f"(after {now()-start:.1f} s.)"
     heur_proc = outfile = None  # placeholder
     if START_WITH is not None:
@@ -553,6 +554,7 @@ parser.add_argument("-l", "--logging", action="store_true", help="wandb logging"
 parser.add_argument("--project-name", default="twbnslim-test", help="wandb project name")
 parser.add_argument("--start-with", default=None,
                     help="optionally skip running heuristic and start with this solution")
+parser.add_argument("--save-as", default="", help="filename to save final network as")
 parser.add_argument("-v", "--verbose", action="store_true", help="verbose mode")
 
 if __name__ == '__main__':
@@ -575,6 +577,7 @@ if __name__ == '__main__':
     if args.start_with is not None:
         START_WITH = os.path.abspath(args.start_with)
     TRAV_STRAT = args.traversal_strategy
+    SAVE_AS = os.path.abspath(args.save_as) if args.save_as else ""
     logger = lambda x: x  # no op
     # logger = lambda x: print(f"log: {x}")  # local log
     if args.logging:
@@ -585,9 +588,12 @@ if __name__ == '__main__':
 
     # if comparison requested, compare then exit
     if args.compare:
+        outfile = SAVE_AS or "temp.res"
+        logger = lambda x: print(f"log: {x}")  # local log
         monitor_blip(filepath, args.treewidth, logger, timeout=args.max_time,
                      seed=args.random_seed, solver=args.heuristic,
-                     domain_sizes=DOMAIN_SIZES, debug=args.verbose)
+                     domain_sizes=DOMAIN_SIZES, outfile=outfile, save_as=SAVE_AS,
+                     debug=args.verbose)
         sys.exit()
 
     register_handler()
@@ -605,6 +611,12 @@ if __name__ == '__main__':
             # todo[req]: complexity width separate verification
             SOLUTION.value.verify(verify_treewidth=not USE_COMPLEXITY_WIDTH)
             print("verified")
+            if SAVE_AS:
+                save_fname = SAVE_AS.replace(".res", "-final.res")
+                write_res(SOLUTION.value, save_fname, write_elim_order=True)
+                obn = SOLUTION.value
+                bn2 = parse_res(filepath, args.treewidth, save_fname)
+                print("saving final network to", save_fname, "as final checkpoint")
             success_rate = SOLUTION.num_improvements / (SOLUTION.num_passes - SOLUTION.skipped)
             if args.logging:
                 wandb.log({"success_rate": success_rate})
