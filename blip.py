@@ -6,6 +6,8 @@ import networkx as nx
 import random
 from typing import Optional, Callable, Dict, List
 import re
+import signal
+from glob import glob
 
 from utils import filled_in, TreeDecomposition, pairs, stream_bn, get_bn_stats, filter_read_bn
 
@@ -14,6 +16,9 @@ from networkx.drawing.nx_agraph import pygraphviz_layout
 
 SOLVER_DIR = "../solvers"
 SCORE_PATN = re.compile(r"New improvement! (?P<score>[\d.-]+) \(after (?P<time>[\d.-]+) s.\)")
+CHECKPOINT_MINUTES = 30  # in minutes
+CHECKPOINT_INTERVAL = int(CHECKPOINT_MINUTES*60)  # in seconds
+CHECKPOINT_RETRY_INTERVAL = 5  # in seconds
 
 
 class BayesianNetwork(object):
@@ -213,14 +218,44 @@ def run_blip(filename, treewidth, outfile="temp.res", timeout=10, seed=0,
         return None
 
 
+def activate_checkpoints(bnprovider, save_as):
+    def alarm_handler(signalnum, frame):
+        print("alarm triggered")
+        try:
+            bn = bnprovider()
+        except IndexError:
+            print("bn res file invalid (probably got overwritten)")
+            signal.alarm(CHECKPOINT_RETRY_INTERVAL)  # snooze alarm
+        else:
+            patn = save_as.replace(".res", "*.res")
+            prefix, ext = os.path.splitext(save_as)
+            prev_checkpoint = 0
+            for check_file in glob(patn):
+                try:
+                    saved_at = int(check_file.replace(prefix, "").replace(ext, ""))
+                except ValueError:
+                    continue
+                else:
+                    prev_checkpoint = max(prev_checkpoint, saved_at)
+            new_checkpoint = prev_checkpoint + CHECKPOINT_MINUTES
+            fname = save_as.replace(".res", f"{new_checkpoint}.res")
+            print("saving checkpoint to", fname)
+            write_res(bn, fname, write_elim_order=True)
+            signal.alarm(CHECKPOINT_INTERVAL)  # reset alarm
+    signal.signal(signal.SIGALRM, alarm_handler)  # register handler
+    signal.alarm(CHECKPOINT_INTERVAL)  # set first alarm
+    print(f"checkpointing for {CHECKPOINT_MINUTES}m activated")
+
+
 def monitor_blip(filename, treewidth, logger: Callable, outfile="temp.res",
-                 timeout=10, seed=0, solver="kg", debug=False):
+                 timeout=10, seed=0, solver="kg", save_as="", debug=False):
     basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"),
                f"solver.{solver}", "-v", "1"]
     args = ["-j", filename, "-w", str(treewidth), "-r", outfile,
             "-t", str(timeout), "-seed", str(seed)]
     cmd = basecmd + args
-    if debug: print("monitoring blip, cmd:", cmd)
+    if debug: print("monitoring blip, cmd:", " ".join(cmd))
+    if save_as: activate_checkpoints(lambda: parse_res(filename, treewidth, outfile), save_as)
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=1,
                           universal_newlines=True) as proc:
         for line in proc.stdout:
