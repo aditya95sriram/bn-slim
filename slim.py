@@ -390,7 +390,9 @@ def slim(filename: str, start_treewidth: int, budget: int = BUDGET,
             return
         if debug: print(f"starting with {START_WITH}, not running heuristic")
         # todo[safety]: handle case when no heuristic solution so far
-        bn = parse_res(filename, start_treewidth, START_WITH)
+        add_extra_tuples = heuristic in ("hc", "hcp")
+        bn = parse_res(filename, start_treewidth, START_WITH,
+                       add_extra_tuples=add_extra_tuples, augfile="augmented.jkl")
     else:
         if MIMIC:
             if debug: print("starting heuristic proc for mimicking")
@@ -605,7 +607,7 @@ if __name__ == '__main__':
         print("solver interrupted")
     finally:
         if SOLUTION.value is None:
-            print("no solution computed so far")
+            print("terminated. no solution computed so far!")
         else:
             # verify final bn (not required if optimizing complexity width)
             # todo[req]: complexity width separate verification

@@ -10,7 +10,7 @@ import signal
 from glob import glob
 
 from utils import filled_in, TreeDecomposition, pairs, stream_bn, get_bn_stats, \
-    filter_read_bn, compute_complexity_width, get_domain_sizes
+    filter_read_bn, compute_complexity_width, read_jkl, write_jkl
 
 import matplotlib.pyplot as plt
 from networkx.drawing.nx_agraph import pygraphviz_layout
@@ -143,8 +143,36 @@ class TWBayesianNetwork(BayesianNetwork):
         return triangulated
 
 
-def parse_res(filename, treewidth, outfile, debug=False) -> TWBayesianNetwork:
-    bn = TWBayesianNetwork(tw=treewidth, input_file=filename)
+def inject_tuples(basejkl, extra_tuples, destname, strong_injection=False):
+    src = read_jkl(basejkl, normalize=False)
+    inject_count = 0
+    for node, pset in extra_tuples.items():
+        parents, score = pset
+        if strong_injection or parents not in src[node]:
+            src[node][parents] = score
+            inject_count += 1
+    write_jkl(src, destname)
+
+
+def parse_res(filename: str, treewidth: int, outfile: str, add_extra_tuples=False,
+              augfile: str = "augmented.jkl", debug=False) -> TWBayesianNetwork:
+    """
+    Parse a .res file containing a solution BN. Optionally merge the parent set
+    tuples from the jkl file `filename` and the the res file `outfile` and
+    save as a temporary file `augfile` (only when `add_extra_tuples` is True)
+
+    :param filename: input jkl file
+    :param treewidth: treewidth bound
+    :param outfile: res file containing BN
+    :param add_extra_tuples: whether to inject tuples from outfile into filename
+    :param augfile: name of temporary file containing merged set of tuples,
+                    (only applicable if add_extra_tuples is True)
+    :param debug: debugging
+    :return: parsed BN as a TWBayesianNetwork
+    """
+    elim_order = None
+    tuples = []
+    extra_tuples = dict()
     with open(outfile) as out:
         for line in out:
             if not line.strip():
@@ -154,19 +182,32 @@ def parse_res(filename, treewidth, outfile, debug=False) -> TWBayesianNetwork:
                 break
             elif line.startswith("elim-order:"):
                 elim_order = line.split()[1].strip("()").split(",")
-                bn.elim_order = list(map(int, elim_order))
-                if debug: print("elim-order:", bn.elim_order)
+                elim_order = list(map(int, elim_order))
+                if debug: print("elim-order:", elim_order)
             else:
                 vertex, rest = line.split(":")
+                vertex = int(vertex)
                 rest = rest.strip().split()
                 if len(rest) == 1:
                     local_score = float(rest[0])
-                    parents = []
+                    parents = frozenset()
                 else:
                     local_score, parents = rest
-                    parents = parents.strip("()").split(",")
-                bn.add(int(vertex), map(int, parents))
+                    local_score = float(local_score)
+                    parents = frozenset(map(int, parents.strip("()").split(",")))
+                # bn.add(int(vertex), map(int, parents))
+                tuples.append((vertex, parents))
+                if add_extra_tuples:
+                    extra_tuples[vertex] = (parents, local_score)
                 if debug: print(f"v:{vertex}, sc:{local_score}, par:{parents})")
+    if add_extra_tuples:
+        inject_tuples(filename, extra_tuples, augfile, True)
+        if debug: print("temporary merged file saved as", augfile)
+        bn = TWBayesianNetwork(tw=treewidth, input_file=augfile)
+    else:
+        bn = TWBayesianNetwork(tw=treewidth, input_file=filename)
+    if elim_order is not None: bn.elim_order = elim_order
+    for node, parents in tuples: bn.add(node, parents)
     bn.done()
     bn._score = score
     return bn
