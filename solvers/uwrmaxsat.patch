@@ -1,0 +1,11 @@
+--- uwrmaxsat/MsSolver.cc	2019-06-03 02:15:26.000000000 +0200
++++ uwrmaxsat/MsSolver.cc	2020-06-09 14:37:46.948899770 +0200
+@@ -892,7 +892,7 @@
+                     ind.push(l);
+                     if (assump_Cs[l] < min_Cs) min_Cs = assump_Cs[l];
+                 }
+-                else reportf("am1: %d %d %d %s\n", i, am1.size(), toInt(am1[0]), toInt(am1[i]), (l>=0 && l <assump_Cs.size()?toString(assump_Cs[l]):"???"));
++                else reportf("am1: %d %d %d %d %s\n", i, am1.size(), toInt(am1[0]), toInt(am1[i]), (l>=0 && l <assump_Cs.size()?toString(assump_Cs[l]):"???"));
+             if (ind.size() < 2) continue;
+             for (int i = 0; i < ind.size(); i++) {
+                 if (assump_Cs[ind[i]] == min_Cs) cls.push(assump_ps[ind[i]]), assump_Cs[ind[i]] = -assump_Cs[ind[i]];

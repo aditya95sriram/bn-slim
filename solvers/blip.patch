@@ -1,0 +1,156 @@
+diff -ru blip-publish-pure/compile-blip.sh blip-publish/compile-blip.sh
+--- blip-publish-pure/compile-blip.sh	2018-03-06 11:45:06.000000000 +0100
++++ blip-publish/compile-blip.sh	2020-06-10 02:25:50.289328320 +0200
+@@ -1,19 +1,23 @@
+ cd core
+ 
++echo -n "compiling core..."
+ mvn clean install -DskipTests -q 
++echo "done"
+ 
+ cd ../api
+ 
++echo -n "compiling api..."
+ mvn clean package -DskipTests -q
++echo "done"
+ 
+ cp target/api-1.0-jar-with-dependencies.jar ../blip.jar
+ 
+ cd ..
+ 
+-scp blip.jar scanagatta@ares.dti.supsi.ch:Tools/
++#scp blip.jar scanagatta@ares.dti.supsi.ch:Tools/
+ # scp blip.jar scanagatta@mango.idsia.ch:Tools/
+-scp blip.jar mauro.scanagatta@supsi.ch@blip.idsia.ch:/var/opt/www/blip/site-data/media/
++#scp blip.jar mauro.scanagatta@supsi.ch@blip.idsia.ch:/var/opt/www/blip/site-data/media/
+ 
+-cp blip.jar ~/Tools/
++#cp blip.jar ~/Tools/
+ 
+-cp blip.jar ../r.blip/inst/java
++#cp blip.jar ../r.blip/inst/java
+diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/BaseSolver.java blip-publish/core/src/main/java/ch/idsia/blip/core/learn/solver/BaseSolver.java
+--- blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/BaseSolver.java	2018-03-06 11:45:06.000000000 +0100
++++ blip-publish/core/src/main/java/ch/idsia/blip/core/learn/solver/BaseSolver.java	2020-06-10 02:25:50.289328320 +0200
+@@ -7,6 +7,7 @@
+ import ch.idsia.blip.core.learn.solver.ps.Provider;
+ import ch.idsia.blip.core.learn.solver.samp.Sampler;
+ import ch.idsia.blip.core.learn.solver.src.Searcher;
++import ch.idsia.blip.core.learn.solver.src.brutal.BrutalOldSearcher;
+ import ch.idsia.blip.core.utils.data.array.TDoubleArrayList;
+ import ch.idsia.blip.core.utils.other.ParentSet;
+ import ch.idsia.blip.core.utils.other.RandomStuff;
+@@ -21,6 +22,7 @@
+ import java.util.logging.Logger;
+ 
+ import static ch.idsia.blip.core.utils.data.ArrayUtils.sameArray;
++import static ch.idsia.blip.core.utils.data.ArrayUtils.reverse;
+ import static ch.idsia.blip.core.utils.other.RandomStuff.*;
+ 
+ 
+@@ -36,6 +38,9 @@
+     // Best structure found yet
+     public ParentSet[] best_str;
+ 
++    // Best elim order found yet
++    public int[] best_vars;
++
+     public boolean testAcycility = false;
+ 
+     public int n_var;
+@@ -113,6 +118,8 @@
+         }
+     }
+ 
++    public BaseSearcher[] mysrcs;
++
+     public ParentSet[] go() {
+ 
+         prepare();
+@@ -126,6 +133,8 @@
+ 
+         almost();
+ 
++        mysrcs = new BaseSearcher[thread_pool_size];
++
+         try {
+             ExecutorService es = Executors.newCachedThreadPool();
+ 
+@@ -133,7 +142,8 @@
+                 if (verbose > 0) {
+                     logf("Starting %d searcher \n", i);
+                 }
+-                es.execute(getNewSearcher(i));
++                mysrcs[i] = getNewSearcher(i);
++                es.execute(mysrcs[i]);
+             }
+ 
+             es.shutdown();
+@@ -248,6 +258,9 @@
+             w = getWriter(s);
+ 
+             // writer.graph("Quick Structure: " + printQuick(best_str));
++            int[] elim_order = best_vars.clone();
++            reverse(elim_order);
++            wf(w, "elim-order: %s\n", " (" + combine(elim_order, ",") + ")");
+ 
+             // writer.graph("\n\nExpanded Structure: \n\n");
+             if (str != null && str.length > 0) {
+@@ -333,6 +346,10 @@
+     }
+ 
+     public void newStructure(ParentSet[] new_str) {
++        newStructure(new_str, -1);
++    }
++
++    public void newStructure(ParentSet[] new_str, int thread) {
+ 
+         if (new_str == null) {
+             return;
+@@ -371,6 +388,9 @@
+ 
+                 atLeastOne = true;
+ 
++                if (mysrcs[thread].src instanceof BrutalOldSearcher)
++                    best_vars = ((BrutalOldSearcher) mysrcs[thread].src).vars.clone();
++
+                 if (res_path != null) {
+                     writeStructure(res_path, best_sk, new_str);
+                 }
+@@ -494,7 +514,7 @@
+             this.thread = thread;
+         }
+ 
+-        private Searcher src;
++        public Searcher src;
+ 
+         @Override
+         public void run() {
+@@ -509,7 +529,7 @@
+                 ParentSet[] str = src.search();
+ 
+                 // Propose the new solution
+-                newStructure(str);
++                newStructure(str, thread);
+ 
+                 checkTime();
+             }
+diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalMaxDirectedSearcher.java blip-publish/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalMaxDirectedSearcher.java
+--- blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalMaxDirectedSearcher.java	2018-03-06 11:45:06.000000000 +0100
++++ blip-publish/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalMaxDirectedSearcher.java	2020-06-10 02:25:50.289328320 +0200
+@@ -88,6 +88,7 @@
+         chooseClique();
+ 
+         // p(Arrays.toString(vars));
++        vars = cloneArray(initCl);
+ 
+         // Prepare structures for best handlers selection
+         initCand();
+@@ -111,6 +112,7 @@
+ 
+             // pf("Chosen %d \n", res.v);
+             finalize(res);
++            vars = addArray(vars, res.v);
+ 
+             solver.checkTime();
+             if (!solver.still_time) {
