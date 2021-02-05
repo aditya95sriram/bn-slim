@@ -1,7 +1,7 @@
 # Turbocharging Treewidth-Bounded Bayesian Network Structure Learning
 
 > Instructions provided below have been tested on linux
-> Last updated: 5th February 2021
+> (last updated: 5th February 2021)
 
 
 ## Required programming languages and software
@@ -13,7 +13,8 @@
 
 > Before you start, move the following files into a directory called `slim`:
   (See Section: Directory Structure)
-  `blip.py  encoding.py  samer_veith.py  slim.py  utils.py`
+  
+    blip.py  berg_encoding.py  samer_veith.py  slim.py  utils.py
 
 
 ## External tools
@@ -126,7 +127,10 @@
 
 ## Datasets and Experiment Data
 
-Unzip the files `datasets.zip` and `experiments.zip`
+Due to github file size restrictions, the following zip files must be downloaded
+separately and then unzipped
+* [`datasets.zip`][8]
+* [`experiments.zip`][9]
 
 
 ## Requirements for BN-SLIM
@@ -181,7 +185,7 @@ bnslim
 │   └── output/
 └── slim
     ├── blip.py
-    ├── encoding.py
+    ├── berg_encoding.py
     ├── samer_veith.py
     ├── slim.py
     └── utils.py
@@ -283,3 +287,6 @@ for the ETL algorithm is always taken as 30 minutes.
 [5]: https://github.com/marcobb8/et-learn/blob/master/README.md
 [6]: https://www.saltycrane.com/blog/2009/05/notes-using-pip-and-virtualenv-django/
 [7]: https://stackoverflow.com/a/1534343/1614140
+[8]: https://www.ac.tuwien.ac.at/files-dav/resources/software/bnslim/datasets.zip
+[9]: https://www.ac.tuwien.ac.at/files-dav/resources/software/bnslim/experiments.zip
+
