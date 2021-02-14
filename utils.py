@@ -332,8 +332,39 @@ class TreeDecomposition(object):
         self.elim_order = order
         self.width = width
         self._bag_ctr = 0
-        self.decomp_from_ordering(graph, order, width)
+        if order is not None:
+            self.decomp_from_ordering(graph, order, width)
 
+    @staticmethod
+    def from_td(tdstr: str):
+        # parse tree decomposition
+        tdlines = tdstr.split("\n")
+        header = tdlines.pop(0)
+        ltype, _, nbags, maxbagsize, nverts = header.split()
+        assert ltype == "s", "invalid header ({ltype}) in tree decomposition"
+
+        self = TreeDecomposition(None, None)
+        self.width = int(maxbagsize) - 1
+        self._bag_ctr = int(nbags) + 1
+
+        for line in tdlines:
+            if not line: continue
+            ltype, rest = line.split(maxsplit=1)
+            if ltype == "c":  # comment line, ignore
+                continue
+            elif ltype == "b":
+                bag_idx, rest = rest.split(maxsplit=1)
+                bag_idx = int(bag_idx)-1
+                bag = frozenset(map(int, rest.split()))
+                self.bags[bag_idx] = bag
+                self.decomp.add_node(bag_idx)
+            else:  # edge of tree decomp
+                u, v = int(ltype), int(rest)
+                self.decomp.add_edge(u-1, v-1)
+
+        self.elim_order = self.recompute_elim_order()
+        return self
+        
     def add_bag(self, nodes: Union[set, frozenset], parent: int = -1):
         nodes = frozenset(nodes)
         bag_idx = self._bag_ctr
@@ -353,7 +384,11 @@ class TreeDecomposition(object):
         else:
             self.width = max_degree
         revorder = order[::-1]
-        cur_nodes = {revorder[0]}
+        try:
+            cur_nodes = {revorder[0]}
+        except IndexError:
+            print("index error", order, revorder)
+            return
         root_bag = self.add_bag(cur_nodes)
         blame = {node: root_bag for node in cur_nodes}
         for u in revorder[1:]:

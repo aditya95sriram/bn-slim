@@ -229,10 +229,14 @@ def write_res(bn: BayesianNetwork, outfile, write_elim_order=False, debug=False)
         out.write(f"\nScore: {bn.compute_score():.3f}\n")
 
 
-def write_net(bn: BayesianNetwork, datfile, tempprefix="lltemp", debug=False):
-    resfile = f"{tempprefix}.res"
+def write_net(bn: BayesianNetwork, datfile, tempprefix="lltemp",
+              use_res="", debug=False):
     netfile = f"{tempprefix}.net"
-    write_res(bn, resfile)
+    if use_res:
+        resfile = use_res
+    else:
+        resfile = f"{tempprefix}.res"
+        write_res(bn, resfile)
     basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"), "parle"]
     args = ["-d", datfile, "-r", resfile, "-n", netfile]
     cmd = basecmd + args
