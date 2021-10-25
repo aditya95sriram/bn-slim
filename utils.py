@@ -384,11 +384,11 @@ class TreeDecomposition(object):
         else:
             self.width = max_degree
         revorder = order[::-1]
-        try:
-            cur_nodes = {revorder[0]}
-        except IndexError:
-            print("index error", order, revorder)
-            return
+        # try:
+        cur_nodes = {revorder[0]}
+        # except IndexError:
+        #     print("index error", order, revorder)
+        #     return
         root_bag = self.add_bag(cur_nodes)
         blame = {node: root_bag for node in cur_nodes}
         for u in revorder[1:]:
@@ -513,7 +513,55 @@ class TreeDecomposition(object):
         elim_order.reverse()
         return elim_order
 
+    def compute_width(self) -> int:
+        """compute treewidth"""
+        return max(map(len, self.bags.values())) - 1
 
+
+class CWDecomposition(TreeDecomposition):
+
+    def __init__(self, graph: nx.Graph, order, width, domain_sizes):
+        # initialize common stuff, exclude order to skip td construction
+        super().__init__(graph, None)
+        self.elim_order = order
+        self.width = width
+        self.domain_sizes = domain_sizes
+        self.rootbag_size = -1
+        self.decomp_from_ordering(graph, order, width, domain_sizes)
+
+    def decomp_from_ordering(self, graph, order, width, domain_sizes):
+        graph, max_degree = filled_in(graph, order)
+        self.width = width
+        revorder = order[::-1]
+        rootbag_complexity, rootbag_size = 1, 0
+        for node in revorder:
+            rootbag_complexity *= domain_sizes[node]
+            if rootbag_complexity > width: break
+            rootbag_size += 1
+        self.rootbag_size = rootbag_size
+        # try:
+        cur_nodes = {revorder[0]}
+        # except IndexError:
+        #     print("index error", order, revorder)
+        #     return
+        cur_nodes = set(revorder[:rootbag_size])
+        root_bag = self.add_bag(cur_nodes)
+        blame = {node: root_bag for node in cur_nodes}
+        for u in revorder[rootbag_size:]:
+            cur_nodes.add(u)
+            neighbors = set(graph.subgraph(cur_nodes).neighbors(u))
+            if neighbors:
+                first_neighbor = find_first_by_order(neighbors, order)
+                parent = blame[first_neighbor]
+            else:
+                parent = root_bag
+            bag_idx = self.add_bag(neighbors | {u}, parent)
+            blame[u] = bag_idx
+        #if __debug__: self.verify()
+
+    def verify(self):
+        raise NotImplementedError
+    
 if __name__ == '__main__':
     g = nx.bull_graph()
     g.add_edges_from([(4, 5), (2, 5)])

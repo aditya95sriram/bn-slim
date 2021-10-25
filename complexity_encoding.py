@@ -44,10 +44,10 @@ def make_decision_diagram(bound: int, weights: Dict[Any, int]):
             if new_level > bound:
                 dd.add_edge(cur_vertex, NO, case="if")
             else:
-                dd.add_edge( cur_vertex, (child, new_level), case="if")
+                dd.add_edge(cur_vertex, (child, new_level), case="if")
                 queue.append((child, new_level))
             # case if not cur_node
-            dd.add_edge( cur_vertex, (child, cur_level), case="else")
+            dd.add_edge(cur_vertex, (child, cur_level), case="else")
             queue.append((child, cur_level))
     return dd
 

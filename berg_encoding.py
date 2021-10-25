@@ -155,7 +155,7 @@ class TwbnEncoding(SvEncoding):
             self._add_comment(f"end [slim] forced clique {set(bag)}")
 
     def encode(self):
-        # allow at most one arc (not strictly necessary)
+        # allow at most one arc (redundant, not strictly necessary, speeds up encoding)
         for i,j in pairs(range(self.num_nodes)):
             _i, _j = self.node_reverse_lookup[i], self.node_reverse_lookup[j]
             self._add_comment(f"at most one arc {_i}->{_j} or {_j}->{_i}")
