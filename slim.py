@@ -5,7 +5,7 @@ import os
 import sys
 import networkx as nx
 import random
-from typing import Dict, List, Tuple, Set, FrozenSet, Callable, Optional
+from typing import Dict, List, Tuple, Callable, Union
 from pprint import pprint
 from time import sleep, time as now
 import argparse
@@ -14,15 +14,18 @@ from collections import Counter
 from operator import itemgetter
 from functools import reduce
 from heapq import heappop, heappush
-import statistics
+from math import log, ceil
+import re
 
 # internal
 from blip import run_blip, BayesianNetwork, TWBayesianNetwork, monitor_blip, \
-    parse_res, start_blip_proc, check_blip_proc, stop_blip_proc, write_res, activate_checkpoints
+    parse_res, start_blip_proc, check_blip_proc, stop_blip_proc, write_res, \
+    activate_checkpoints
 from utils import TreeDecomposition, pick, pairs, filter_read_bn, BNData, NoSolutionException,\
     get_domain_sizes, log_bag_metrics, compute_complexity_width, weight_from_domain_size, \
     compute_complexity, compute_complexities, shuffled
 from berg_encoding import solve_bn, PSET_ACYC
+from eval_model import eval_all
 
 # optional
 import wandb
@@ -38,8 +41,8 @@ EPSILON = 1e-7
 
 # default parameter values
 BUDGET = 10
-TIMEOUT = 5
-MAX_PASSES = 100
+TIMEOUT = 10
+MAX_PASSES = 100000
 MAX_TIME = 1800
 HEURISTIC = 'kmax'
 OFFSET = 2
@@ -51,13 +54,21 @@ TRAV_STRAT = "random"
 MIMIC = False
 DOMAIN_SIZES: Dict[int, int] = None
 DATFILE = ""
-USE_COMPLEXITY_WIDTH = False
+USE_COMPLEXITY_WIDTH = False  # whether in treewidth mode or cwidth mode
 USING_COMPLEXITY_WIDTH = False
 COMPLEXITY_BOUND = -1
 CW_TARGET_REACHED = False
 CW_TRAV_STRAT = "max-rand"  # one of max, max-min, max-rand, tw-max-rand
 CW_EXP_STRAT = "min-int"  # one of max, min, min-int
+CW_REDUCTION_FACTOR = 0.5  # factor to obtain new target for cw from old cw
 SAVE_AS = ""  # pattern to use while saving networks
+CHECKPOINT_MILESTONES = False  # whether to save milestones as checkpoints
+FEASIBLE_CW = False  # sets cw bound as absolute and prevents retrying with iteratively reduced bounds
+FEASIBLE_CW_THRESHOLD = 0.6e5  # rough cw threshold below which reasoning is quick
+HEURISTIC_ONLYFILTER = False  # whether to run cwidth heuristics with only pset filtering
+AUTOBUDGET_OFFSET = 3
+LOG_METRICS = False  # log metrics like ll and mae to wandb
+LOGGING = False  # wandb logging
 
 
 def find_start_bag(td: TreeDecomposition, history: Counter = None, debug=False):
@@ -359,7 +370,8 @@ def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT
         new_cw = compute_complexity_width(replbn.td, DOMAIN_SIZES)
         old_acw = compute_complexity_width(td, DOMAIN_SIZES, include=selected, approx=True)
         new_acw = compute_complexity_width(replbn.td, DOMAIN_SIZES, approx=True)
-        print(f"old: {old_cw}|{old_acw}\tnew: {new_cw}|{new_acw}")
+        # print(f"old: {old_cw}|{old_acw:.3f}\tnew: {new_cw}|{new_acw:.3f}")
+        print(f"msss of local part: {old_cw} -> {new_cw}")
     # replacement criterion
     if USING_COMPLEXITY_WIDTH and old_cw > width_bound:
         if new_cw > width_bound:
@@ -377,19 +389,24 @@ def slimpass(bn: TWBayesianNetwork, budget: int = BUDGET, timeout: int = TIMEOUT
 
 
 def slim(filename: str, start_treewidth: int, budget: int = BUDGET,
-         sat_timeout: int = TIMEOUT, max_passes=MAX_PASSES, max_time: int = MAX_TIME,
-         heuristic=HEURISTIC, offset: int = OFFSET, seed=SEED, debug=False):
-    global USING_COMPLEXITY_WIDTH, COMPLEXITY_BOUND, CW_TARGET_REACHED
+         start_with_bn: TWBayesianNetwork = None, sat_timeout: int = TIMEOUT,
+         max_passes=MAX_PASSES, max_time: int = MAX_TIME, heuristic=HEURISTIC,
+         offset: int = OFFSET, seed=SEED, debug=False):
+    global USING_COMPLEXITY_WIDTH, COMPLEXITY_BOUND, CW_TARGET_REACHED,\
+        CHECKPOINT_MILESTONES
     start = now()
     if SAVE_AS: activate_checkpoints(lambda: SOLUTION.value, SAVE_AS)
     def elapsed(): return f"(after {now()-start:.1f} s.)"
     heur_proc = outfile = None  # placeholder
-    if START_WITH is not None:
+    if start_with_bn is not None:
+        bn = start_with_bn
+    elif START_WITH is not None:
         if not os.path.isfile(START_WITH):
-            print(f"specified start-with file doesn't exist, quitting {elapsed()}")
+            print(f"specified start-with file doesn't exist, quitting", file=sys.stderr)
             return
         if debug: print(f"starting with {START_WITH}, not running heuristic")
         # todo[safety]: handle case when no heuristic solution so far
+        # todo[safety]: make add_extra_tuples a cli option
         add_extra_tuples = heuristic in ("hc", "hcp")
         bn = parse_res(filename, start_treewidth, START_WITH,
                        add_extra_tuples=add_extra_tuples, augfile="augmented.jkl")
@@ -409,10 +426,18 @@ def slim(filename: str, start_treewidth: int, budget: int = BUDGET,
             bn = run_blip(filename, start_treewidth, timeout=offset, seed=seed,
                           solver=heuristic)
     if __debug__: bn.verify()
+    # save checkpoint: milestone > start
+    if CHECKPOINT_MILESTONES:
+        write_res(bn, SAVE_AS.replace(".res", "-start.res"), write_elim_order=True)
     if USE_COMPLEXITY_WIDTH:
         start_cw = compute_complexity_width(bn.td, DOMAIN_SIZES)
         start_acw = compute_complexity_width(bn.td, DOMAIN_SIZES, approx=True)
-        complexity_bound = start_cw // 2  # todo[opt]: maybe use weight as bound?
+        #complexity_bound = start_cw // 2  # todo[opt]: maybe use weight as bound?
+        if FEASIBLE_CW:
+            complexity_bound = FEASIBLE_CW_THRESHOLD
+            if LOGGING: wandb.log({"infeasible": start_cw > complexity_bound})
+        else:
+            complexity_bound = min(start_cw - 1, int(start_cw * CW_REDUCTION_FACTOR))
         print(f"start cw: {start_cw}\tacw:{start_acw}")
         print(f"setting complexity bound: {complexity_bound}|{weight_from_domain_size(complexity_bound)}")
         COMPLEXITY_BOUND = complexity_bound
@@ -428,11 +453,23 @@ def slim(filename: str, start_treewidth: int, budget: int = BUDGET,
     if USE_COMPLEXITY_WIDTH: SOLUTION.start_width = start_cw
     history = Counter(dict.fromkeys(bn.td.decomp.nodes, 0))
     if seed: random.seed(seed)
-    for i in range(max_passes):
+    cw_stop_looping = False
+    while max_passes < 0 or SOLUTION.num_passes <= max_passes:
+        # if USE_COMPLEXITY_WIDTH and cw_stop_looping:
+        #     if debug: print("*** initial bn score matched/surpassed ***\n")
+        #    # save checkpoint: milestone > finish
+            # if CHECKPOINT_MILESTONES:
+            #     write_res(bn, SAVE_AS.replace(".res", "-finish.res"), write_elim_order=True)
+            #     CHECKPOINT_MILESTONES = False
+            # break
         if USE_COMPLEXITY_WIDTH:
-            USING_COMPLEXITY_WIDTH = i >= 10 or CW_TRAV_STRAT != "tw-max-rand"
+            USING_COMPLEXITY_WIDTH = SOLUTION.num_passes >= 10 or CW_TRAV_STRAT != "tw-max-rand"
         width_bound = complexity_bound if USING_COMPLEXITY_WIDTH else start_treewidth
         replaced = slimpass(bn, budget, sat_timeout, history, width_bound, debug=False)
+        if replaced is None:  # no change by slimpass
+            # if debug:
+            #     print("failed slimpass (no subtree|lazy threshold|no maxsat soln)")
+            continue  # don't count this as a pass
         SOLUTION.num_passes += 1
         new_score = bn.score
         if new_score > prev_score:
@@ -440,6 +477,8 @@ def slim(filename: str, start_treewidth: int, budget: int = BUDGET,
             prev_score = new_score
             SOLUTION.update(bn)
             SOLUTION.num_improvements += 1
+            if USE_COMPLEXITY_WIDTH and new_score >= SOLUTION.start_score:
+                cw_stop_looping = True
         elif replaced:
             print("*** No improvement, but replacement performed ***")
             prev_score = new_score
@@ -464,15 +503,23 @@ def slim(filename: str, start_treewidth: int, budget: int = BUDGET,
                 if USING_COMPLEXITY_WIDTH and CW_TRAV_STRAT in ["max-min", "max-rand", "tw-max-rand"]:
                     print("*** cw target reached, flipping strategy ***")
                 CW_TARGET_REACHED = True
-        if debug and USE_COMPLEXITY_WIDTH: print("current cw:", current_cw)
-        if debug: print(f"* Iteration {i}:\t{bn.score:.5f} {elapsed()}\n")
+                # if bn.score >= prev_score: cw_stop_looping = True
+                # save checkpoint: milestone > lowpoint
+                if CHECKPOINT_MILESTONES:
+                    write_res(bn, SAVE_AS.replace(".res", "-lowpoint.res"), write_elim_order=True)
+        if debug and USE_COMPLEXITY_WIDTH: print("current msss:", current_cw)
+        if debug: print(f"* Iteration {SOLUTION.num_passes}:\t{bn.score:.5f} {elapsed()}\n")
         if now() - start > max_time:
             if debug: print("time limit exceeded, quitting")
             break
+    else:
+        if debug: print(f"{max_passes} passes completed, quitting")
     if MIMIC:
         if debug: print("stopping heur proc")
         stop_blip_proc(heur_proc)
     print(f"done {elapsed()}")
+    if USE_COMPLEXITY_WIDTH and cw_stop_looping:
+        return True
 
 
 class SolverInterrupt(BaseException): pass
@@ -499,26 +546,35 @@ def wandb_configure(wandb: wandb, args):
     wandb.config.heuristic = args.heuristic
     wandb.config.offset = args.offset
     wandb.config.threshold = args.lazy_threshold
-    wandb.config.seed = args.random_seed
-    wandb.config.method = "heur" if args.compare else f"slim_{args.heuristic}"
+    wandb.config.SEED = args.random_seed
+    wandb.config.method = args.heuristic if args.compare else f"slim_{args.heuristic}"
     wandb.config.traversal = args.traversal_strategy
     wandb.config.relaxed = int(args.relaxed_parents)
     wandb.config.mimic = int(args.mimic)
     wandb.config.datfile = args.datfile
     wandb.config.complexity_width = args.complexity_width
     wandb.config.cw_strategy = args.cw_strategy
+    if USE_COMPLEXITY_WIDTH: wandb.config.cwbound = args.feasible_cw_threshold
+    wandb.config.autobudget = args.autobudget_offset
+    if args.heuristic in ["kg", "kmax"]:
+        wandb.config.widthmode = "tw"
+    elif args.heuristic.endswith("-mw"):
+        wandb.config.widthmode = "mw"
+    elif args.heuristic.endswith("-cw"):
+        wandb.config.widthmode = "cw"
+
     # process config
     wandb.config.platform = "cluster" if CLUSTER else "workstation"
-    wandb.config.jobid = os.environ.get("MY_JOB_ID", -1)
-    wandb.config.taskid = os.environ.get("MY_TASK_ID", -1)
+    wandb.config.jobid = int(os.environ.get("MY_JOB_ID", -1))
+    wandb.config.taskid = int(os.environ.get("MY_TASK_ID", -1))
 
 
 # noinspection PyTypeChecker
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 parser.add_argument("file", help="path to input file")
-parser.add_argument("treewidth", help="bound for treewidth", type=int)
+parser.add_argument("treewidth", help="bound for treewidth (set 0 to use cwidth)", type=int)
 parser.add_argument("-b", "--budget", type=int, default=BUDGET,
-                    help="budget for size of local instance")
+                    help="budget for size of local instance (set 0 for autobudget)")
 parser.add_argument("-s", "--sat-timeout", type=int, default=TIMEOUT,
                     help="timeout per MaxSAT call")
 parser.add_argument("-p", "--max-passes", type=int, default=MAX_PASSES,
@@ -526,13 +582,14 @@ parser.add_argument("-p", "--max-passes", type=int, default=MAX_PASSES,
 parser.add_argument("-t", "--max-time", type=int, default=MAX_TIME,
                     help="max time for SLIM to run")
 parser.add_argument("-u", "--heuristic", default=HEURISTIC,
-                    choices=["kg", "ka", "kmax", "hc", "hcp"], help="heuristic solver to use")
+                    choices=["kg", "ka", "kmax", "hc", "hcp", "greedy-mw", "max-mw",
+                             "greedy-cw", "max-cw"], help="heuristic solver to use")
 parser.add_argument("-o", "--offset", type=int, default=OFFSET,
                     help="duration after which slim takes over")
 parser.add_argument("-c", "--compare", action="store_true",
                     help="run only heuristic to gather stats for comparison")
 parser.add_argument("-z", "--lazy-threshold", type=float, default=LAZY_THRESHOLD,
-                    help="threshold below which to not try to improve local instances")
+                    help="threshold below which to not try to improve local instances (set 0 to disable)")
 parser.add_argument("-x", "--relaxed-parents", action="store_true",
                     help="relax allowed parent sets for maxsat encoding\n"
                          "[warning: use at own risk, could terminate abruptly]")
@@ -550,6 +607,22 @@ parser.add_argument("--cw-strategy", default=CW_TRAV_STRAT,
                     choices=["max", "max-rand", "max-min", "tw-max-rand"],
                     help="complexity width reduction traversal strategy\n"
                          "[ignored if option -w|--complexity width not provided]")
+parser.add_argument("--cw-reduction-factor", default=CW_REDUCTION_FACTOR, type=float,
+                    help="factor to multiply current cw by to obtain target cw")
+parser.add_argument("--checkpoint-milestones", action="store_true",
+                    help="save key milestone networks")
+parser.add_argument("--feasible-cw", action="store_true", help="use feasible cw"
+                    " thresholding instead of iterative decrementing")
+parser.add_argument("--feasible-cw-threshold", type=int, default=FEASIBLE_CW_THRESHOLD,
+                    help="absolute bound for cwidth when --feasible-cw is provided")
+parser.add_argument("--heuristic-onlyfilter", action="store_true",
+                    help="whether to run cwidth heuristic with only pset filtering"
+                         "(cwidth bound is only suggestive when this is enabled)")
+parser.add_argument("--autobudget-offset", type=int, default=AUTOBUDGET_OFFSET,
+                    help="how much to offset cwidth/tw to obtain budget value"
+                         "(only applicable when budget=0 (i.e. autobudget mode)")
+parser.add_argument("--log-metrics", action="store_true",
+                    help="log metrics log-likelihood and mean absolute error")
 parser.add_argument("-r", "--random-seed", type=int, default=SEED,
                     help="random seed (set 0 for no seed)")
 parser.add_argument("-l", "--logging", action="store_true", help="wandb logging")
@@ -566,23 +639,43 @@ if __name__ == '__main__':
     RELAXED_PARENTS = args.relaxed_parents
     MIMIC = args.mimic
     DATFILE = args.datfile
+    SAVE_AS = os.path.abspath(args.save_as) if args.save_as else ""
     DOMAIN_SIZES = get_domain_sizes(args.datfile) if args.datfile else None
     if args.complexity_width:
         USE_COMPLEXITY_WIDTH = True
         if DOMAIN_SIZES is None:
             parser.error("--complexity-width requires --datfile")
     CW_TRAV_STRAT = args.cw_strategy
+    CW_REDUCTION_FACTOR = args.cw_reduction_factor
+    CHECKPOINT_MILESTONES = args.checkpoint_milestones
+    FEASIBLE_CW = args.feasible_cw
+    FEASIBLE_CW_THRESHOLD = args.feasible_cw_threshold
+    HEURISTIC_ONLYFILTER = args.heuristic_onlyfilter
+    if CHECKPOINT_MILESTONES and not SAVE_AS:
+        parser.error("--checkpoint-milestones switch requires --save-as option")
+    LOG_METRICS = args.log_metrics
+    if LOG_METRICS and not CHECKPOINT_MILESTONES:
+        parser.error("--log-metrics switch requires --checkpoint-milestones option")
+    if args.budget == 0:  # auto-budget: set to nearest multiple of 5 (10, 15, 20, 25 ... )
+        if USE_COMPLEXITY_WIDTH:
+            min_domain_size = min(DOMAIN_SIZES.values())
+            equivalent_tw = ceil(log(FEASIBLE_CW_THRESHOLD, min_domain_size))
+        else:
+            equivalent_tw = args.treewidth
+        args.budget = max(10, int(5 * ceil((equivalent_tw + args.autobudget_offset) / 5)))  # nearest multiple of 5
+        print(f"autobudget set to {args.budget} (tw: {equivalent_tw})")
     if args.budget <= args.treewidth and not args.compare:
-        print("budget smaller than treewidth bound, quitting")
+        print("budget smaller than treewidth bound, quitting", file=sys.stderr)
         sys.exit()
     print("not"*__debug__, "running optimized")
     if args.start_with is not None:
         START_WITH = os.path.abspath(args.start_with)
     TRAV_STRAT = args.traversal_strategy
-    SAVE_AS = os.path.abspath(args.save_as) if args.save_as else ""
     logger = lambda x: x  # no op
     # logger = lambda x: print(f"log: {x}")  # local log
-    if args.logging:
+    LOGGING = args.logging
+    SEED = args.random_seed
+    if LOGGING:
         wandb.init(project=args.project_name)
         wandb_configure(wandb, args)
         logger = wandb.log
@@ -591,18 +684,34 @@ if __name__ == '__main__':
     # if comparison requested, compare then exit
     if args.compare:
         outfile = SAVE_AS or "temp.res"
-        logger = lambda x: print(f"log: {x}")  # local log
-        monitor_blip(filepath, args.treewidth, logger, timeout=args.max_time,
-                     seed=args.random_seed, solver=args.heuristic,
-                     domain_sizes=DOMAIN_SIZES, outfile=outfile, save_as=SAVE_AS,
-                     debug=args.verbose)
+        #logger = lambda x: print(f"log: {x}")  # local log
+        common_args = dict(timeout=args.max_time, seed=SEED, outfile=outfile,
+                           solver=args.heuristic, datfile=args.datfile,
+                           save_as=SAVE_AS, debug=args.verbose)
+        if USE_COMPLEXITY_WIDTH:
+            if not FEASIBLE_CW:
+                raise NotImplementedError("compare mode doesn't currently support"
+                                          " iterative cwidth target reduction")
+            monitor_blip(filepath, 0, logger, cwidth=FEASIBLE_CW_THRESHOLD,
+                         onlyfilter=HEURISTIC_ONLYFILTER, **common_args)
+        else:
+            monitor_blip(filepath, args.treewidth, logger, **common_args)
         sys.exit()
 
     register_handler()
     try:
-        slim(filepath, args.treewidth, args.budget, args.sat_timeout,
-             args.max_passes, args.max_time, args.heuristic, args.offset,
-             args.random_seed, args.verbose)
+        # perform slim once and retry only if working with cw
+        res = slim(filepath, args.treewidth, args.budget, None, args.sat_timeout,
+                   args.max_passes, args.max_time, args.heuristic, args.offset,
+                   SEED, args.verbose)
+        while USE_COMPLEXITY_WIDTH and not FEASIBLE_CW:
+            if not res:
+                print("unable to improve complexity width")
+                break
+            CW_TARGET_REACHED = False  # reset target reached flag
+            res = slim(filepath, args.treewidth, args.budget, SOLUTION.value,
+                       args.sat_timeout, args.max_passes, args.max_time,
+                       args.heuristic, args.offset, SEED, args.verbose)
     except SolverInterrupt:
         print("solver interrupted")
     finally:
@@ -616,12 +725,35 @@ if __name__ == '__main__':
             if SAVE_AS:
                 save_fname = SAVE_AS.replace(".res", "-final.res")
                 write_res(SOLUTION.value, save_fname, write_elim_order=True)
-                obn = SOLUTION.value
-                bn2 = parse_res(filepath, args.treewidth, save_fname)
                 print("saving final network to", save_fname, "as final checkpoint")
+                # evaluate metrics
+                if LOG_METRICS:  # checkpoint milestones guaranteed guraranteed
+                    finalres = save_fname
+                    startres = SAVE_AS.replace(".res", "-start.res")
+                    print("evaluating metrics for", finalres)
+                    ll, maescore, maetime = eval_all(filepath, args.treewidth,
+                                                     DATFILE, finalres, SEED)
+                    start_metrics = dict(start_ll=ll, start_maescore=maescore,
+                                         start_maetime=maetime)
+                    if LOGGING:
+                        wandb.log(start_metrics)
+                    else:
+                        print(start_metrics)
+                    print("evaluating metrics for", startres)
+                    ll, maescore, maetime = eval_all(filepath, args.treewidth,
+                                                     DATFILE, startres, SEED)
+                    final_metrics = dict(final_ll=ll, final_maescore=maescore,
+                                         final_maetime=maetime)
+                    if LOGGING:
+                        wandb.log(final_metrics)
+                    else:
+                        print(final_metrics)
             success_rate = SOLUTION.num_improvements / (SOLUTION.num_passes - SOLUTION.skipped)
-            if args.logging:
+            treewidths = dict(start_tw=args.treewidth,
+                              final_tw=SOLUTION.value.td.compute_width())
+            if LOGGING:
                 wandb.log({"success_rate": success_rate})
+                wandb.log(treewidths)
                 if SOLUTION.num_improvements > 0:
                     wandb.log({"improved": True})
             else:
@@ -629,7 +761,8 @@ if __name__ == '__main__':
                 pprint(SOLUTION.data)
                 print(f"success_rate: {success_rate:.2%}")
                 print(f"final score: {SOLUTION.value.score:.5f}")
+                print(treewidths)
                 if DOMAIN_SIZES:
-                    log_bag_metrics(SOLUTION.value.td, DOMAIN_SIZES, append=True)
+                    #log_bag_metrics(SOLUTION.value.td, DOMAIN_SIZES, append=True)
                     print("complexity-width:", compute_complexity_width(SOLUTION.value.td,
                                                                         DOMAIN_SIZES))
