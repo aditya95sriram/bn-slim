@@ -7,14 +7,15 @@
 ## Required programming languages and software
 
 * `Java SDK` (required to run BLIP)
+    - `Maven` (required to build BLIP)
 * `Python 3.6` or higher (required to run BN-SLIM)
+* `C++` (required to run Merlin)
+    - `Make` (required to build Merlin and UWrMaxSat)
 * `git` (required to obtain ETL source code)
 * `Python 2.7` (required to run ETL)
 
-> Before you start, move the following files into a directory called `slim`:
+> Before you start, move all python (.py) files into the `slim` directory:
   (See Section: Directory Structure)
-  
-    blip.py  berg_encoding.py  samer_veith.py  slim.py  utils.py
 
 
 ## External tools
@@ -97,6 +98,44 @@
     ```
 
 
+### Merlin (`setup-merlin.sh`)
+
+1. Download and unzip source from [Merlin][8]
+
+    ```sh
+    pushd solvers
+    wget https://github.com/radum2275/merlin/tree/008d910307a2043f9446676f28010079ea49ec15 --no-check-certificate -O merlin-src.zip
+    unzip merlin-src.zip
+    ```
+
+2. Apply patch `merlin.patch` to enable elim-order output
+
+    ```sh
+    pushd merlin-src
+    patch -ub -p1 -i ../merlin.patch
+    ```
+
+3. Compile Merlin
+
+    ```sh
+    make
+    popd
+    ```
+
+4. Place executable in `solvers` directory
+
+    ```sh
+    cp merlin-src/bin/merlin . -v
+    popd
+    ```
+
+5. (Optional) Test and check if `tmp.PR.json` contains `value` of `-7.730569` after running
+
+    ```sh
+    solvers/merlin -t PR -a wmb -M lex -o tmp -O json -i 4 -f test.uai -e test.evid
+    ```
+
+
 ### ET-Learn (`download-etlearn.sh`)
 
 1. Download and unzip source from [et-learn][3] or clone the [git repo][4]
@@ -127,10 +166,13 @@
 
 ## Datasets and Experiment Data
 
-Due to github file size restrictions, the following zip files must be downloaded
-separately and then unzipped
-* [`datasets.zip`][8]
-* [`experiments.zip`][9]
+The datasets are available in the `datasets` folder, which contains two
+subfolders: the `dat` folder with `.dat` files and the `jkl` folder with
+the `.jkl` files (see Section on File formats for more details).
+
+The Experimental results are contained in the `experiments` folder.
+The raw data from the experiments are provided as `.csv` files
+while the scatter plots are available in the `plots` subfolder.
 
 
 ## Requirements for BN-SLIM
@@ -159,20 +201,28 @@ bnslim
 ├── README.md
 ├── setup-uwrmaxsat.sh
 ├── setup-blip.sh
+├── setup-merlin.sh
 ├── download-etlearn.sh
 ├── test.cnf
 ├── test.jkl
+├── test.dat
+├── test.uai
+├── test.evid
 ├── test.data
 ├── demo.res
+├── demo.net
 ├── requirements.txt
 ├── optional_requirements.txt
 ├── solvers
 │   ├── uwrmaxsat.patch
 │   ├── blip.patch
+│   ├── merlin.patch
 │   ├── UWrMaxSat-1.0*
 │   ├── uwrmaxsat*
 │   ├── blip-publish*
 |   ├── blip.jar*
+│   ├── merlin-src*
+│   ├── merlin*
 |   └── et_learn*
 |       ├── hcet.py
 │       └── ... 
@@ -180,15 +230,19 @@ bnslim
 |   ├── dat/
 |   └── jkl/
 ├── experiments*
-|   ├── data.csv
-|   ├── log_likelihood.csv
-│   └── output/
+|   ├── baseline_data.csv
+|   ├── heuristic_data.csv
+│   └── plots/
 └── slim
     ├── blip.py
+    ├── bnio.py
+    ├── complexity_encoding.py
     ├── berg_encoding.py
+    ├── eval_model.py
     ├── samer_veith.py
     ├── slim.py
-    └── utils.py
+    ├── utils.py
+    └── verify_cwidth.py
 ```
 
 
@@ -196,7 +250,10 @@ bnslim
 
 ```sh
 cd slim
-python slim.py ../datasets/jkl/accidents.test.jkl 5 -v -u kmax -t 60
+# bounded treewidth
+python slim.py ../test.jkl 5 -v -u kmax -t 60
+# bounded msss
+python slim.py ../test.jkl 0 -v -u kmax -t 60 -b 0 -d ../test.dat --start-with ../demo.res -w --feasible-cw --feasible-cw-threshold 108
 ```
 
 > Run `python slim.py --help` for description of available options
@@ -204,7 +261,13 @@ python slim.py ../datasets/jkl/accidents.test.jkl 5 -v -u kmax -t 60
 > For larger networks it is recommended to invoke as `python -O slim.py ...`
 
 
-## `.res` files
+## File formats
+
+Since most of the file formats used/required for this software and its
+auxiliary helper softwares to run aren't standard, we provide a brief 
+description of some of these file formats.
+
+### `.res` file type
 
 A `.res` file contains the DAG expressed by means of the parent sets
 as well as a field indicating the score of the DAG and optionally
@@ -213,6 +276,41 @@ the elimination ordering used to bound the treewidth of the DAG.
 
 The patch applied to BLIP allows it to output `.res` files with the 
 elimination ordering which isn't supported by it out-of-the-box.
+Additionally, it adds support for working with maximum state space
+size instead of treewidth.
+
+The patch applied to Merlin allows us to customize the elimination ordering
+technique/heuristic of the variables via the `-M` command line argument.
+In our use-case, we pre-set the ordering in the uai file and supply `-M lex`
+to invoke the lexicographic ordering, thereby preserving and respecting
+our pre-supplied ordering.
+
+
+### `.dat`/`.data` file types
+
+These files contain the samples drawn from the Bayesian Networks. This 
+isn't a standard format and hence there exist discrepancies in the way
+different programs and applications treat them. In general, these 
+are space-separated (or comma-separated) files with or without the header.
+The header refers to two lines at the beginning of the file.
+The first line of the header contains the names of the random
+variables (space-separated). The second line contains the domain sizes
+of the variables in the same order.
+
+### `.jkl` file type
+
+A `.jkl` file contains the pre-computed parent set score function caches.
+Usually these are computed via the `blip.jar scorer.is ...`.
+
+### `.uai`/`.net` file types
+
+These are somewhat standard file formats for storing Bayesian Networks.
+The `.uai` format is required by Merlin and the `.net` format is used
+as an intermediate format to go from `.res -> .uai`.
+
+### `.evid` file type
+
+File format for supplying evidence to Merlin.
 
 The provided python script `hcet.py` allows one to obtain the solution of the
 ETL algorithm(s) in the form of a compliant `.res` file which can be supplied
@@ -228,7 +326,23 @@ Run `python et_learn/hcet.py --help` for more details.
 
 ## Results
 
-### ∆BIC analysis
+### NeurIPS 2021 paper
+
+`experiments/baseline_data.csv` and `experiments/heuristic_data.csv`
+contain all the data for the 16 datasets from `datasets.zip`, 
+for multiple treewidths, msss bounds and random seeds
+run with the following configuration:
+
+```sh
+python -O slim.py <dataset> <treewidth> -t5400 -u <heuristic> -d <datfile.dat> --start-with <heur_sol.res> -w --feasible-cw --feasible-cw-threshold <msssbound> -r<seed> --budget 0 -v"
+```
+
+Where `heur_sol.res` is the initial heuristic solution which was computed before-hand
+and supplied using the `--start-with` option, and `datfile.dat` is the datfile corresponding
+to the supplied dataset.
+
+
+### AAAI 2020 paper (∆BIC analysis)
 
 #### BN-SLIM(ETLd) vs ETLd
 
@@ -260,9 +374,7 @@ Run `python et_learn/hcet.py --help` for more details.
 | strongly negative  | 0    | 1    | 0    |
 | extremely negative | 0    | 11   | 6    |
 
-`experiments/data.csv` contains all the data for the 97 datasets from `datasets.zip`, 
- three treewidth values (2, 5, 8) and three random seed values (1,2,3) 
- run with the following configuration:
+Above tables obtained by running with the following configuration:
 
 ```sh
 python -O slim.py <dataset> <treewidth> -r<seed> -t1800 -u kmax -vx --start-with=<sol.res>
@@ -271,13 +383,7 @@ python -O slim.py <dataset> <treewidth> -r<seed> -t1800 -u kmax -vx --start-with
 Where `sol.res` is the initial heuristic solution which was computed before-hand
 and supplied using the `--start-with` option.
 
-
-### Log-likelihood analysis
-The partial data of the log-likelihood analysis is available in 
-`experiments/log_likelihood.csv`. A `-1` in the `seed` column indicates 
-no seeding (for the ETL algorithms). The `time` column indicates the time
-required (in minutes) to generate the network in question, which, 
-for the ETL algorithm is always taken as 30 minutes.
+If that doesn't work, try running with a `aaai` tagged commit.
 
 
 [1]: https://maxsat-evaluations.github.io/2019/descriptions.html
@@ -287,6 +393,5 @@ for the ETL algorithm is always taken as 30 minutes.
 [5]: https://github.com/marcobb8/et-learn/blob/master/README.md
 [6]: https://www.saltycrane.com/blog/2009/05/notes-using-pip-and-virtualenv-django/
 [7]: https://stackoverflow.com/a/1534343/1614140
-[8]: https://www.ac.tuwien.ac.at/files-dav/resources/software/bnslim/datasets.zip
-[9]: https://www.ac.tuwien.ac.at/files-dav/resources/software/bnslim/experiments.zip
+[8]: https://github.com/radum2275/merlin/tree/008d910307a2043f9446676f28010079ea49ec15
 
