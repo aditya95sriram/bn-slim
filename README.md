@@ -1,7 +1,11 @@
 # Turbocharging Treewidth-Bounded Bayesian Network Structure Learning
 
+
+[![DOI](https://zenodo.org/badge/336274070.svg)](https://zenodo.org/badge/latestdoi/336274070)
+
+
 > Instructions provided below have been tested on linux
-> (last updated: 5th February 2021)
+> (last updated: 26th October 2021)
 
 
 ## Required programming languages and software
