@@ -1,11 +1,15 @@
 #!/bin/python3.6
+from math import ceil, log2
 
 import networkx as nx
 import itertools
 import random
-from typing import Union, Tuple, Dict, List, Iterator, FrozenSet, TextIO, Set
+from typing import Union, Tuple, Dict, List, Iterator, FrozenSet, TextIO, Set, \
+    Any
 import sys, os
 from operator import itemgetter
+from functools import reduce
+from collections import OrderedDict
 
 import matplotlib.pyplot as plt
 from networkx.drawing.nx_agraph import graphviz_layout
@@ -46,6 +50,23 @@ def posdict_to_ordering(positions: dict):
     for elem, pos in positions.items():
         ordering[pos] = elem
     return ordering
+
+
+def replicate(d: OrderedDict):
+    """
+    convert a dict with (element, count) into a list
+    with each element replicated count many times
+    """
+    l = []
+    for element, count in d.items():
+        l.extend([element]*count)
+    return l
+
+
+def shuffled(l):
+    s = [e for e in l]
+    random.shuffle(s)
+    return s
 
 
 # i/o utility functions
@@ -167,6 +188,77 @@ def get_bn_stats(filename: str) -> Tuple[float, float, Dict[int, float]]:
     return sum_score, best_score, offsets
 
 
+def get_domain_sizes(filename: str) -> Dict[int, int]:
+    with open(filename, 'r') as datfile:
+        _ = datfile.readline()  # skip header line
+        domain_sizes = [int(ds) for ds in datfile.readline().split()]
+        num_vars = len(domain_sizes)
+        return dict(zip(range(num_vars), domain_sizes))
+
+
+def get_vardata(filename: str) -> OrderedDict:
+    with open(filename, 'r') as datfile:
+        names = datfile.readline().strip().split()
+        domain_sizes = [int(ds) for ds in datfile.readline().strip().split()]
+        return OrderedDict(zip(names, domain_sizes))
+
+
+# complexity width related function
+
+def weight_from_domain_size(domain_size):
+    # return ceil(log2(domain_size))
+    # return ceil(2*log2(domain_size))
+    return log2(domain_size)
+
+
+def weights_from_domain_sizes(domain_sizes):
+    return {node: weight_from_domain_size(size) for node, size in domain_sizes.items()}
+
+
+def compute_complexity(bag: Union[Set, FrozenSet], domain_sizes: Dict[int, int],
+                       approx=False) -> int:
+    values = weights_from_domain_sizes(domain_sizes) if approx else domain_sizes
+    if approx:
+        reducer = lambda x, y: x+y
+    else:
+        reducer = lambda x, y: x*y
+    return reduce(reducer, (values[var] for var in bag))
+
+
+def compute_complexities(td: 'TreeDecomposition', domain_sizes: Dict[int, int],
+                         approx=False) -> Dict[int, int]:
+    values = weights_from_domain_sizes(domain_sizes) if approx else domain_sizes
+    if approx:
+        reducer = lambda x,y: x+y
+    else:
+        reducer = lambda x,y: x*y
+    # reducer = int.__add__ if approx else int.__mul__
+    complexities: Dict[int, int] = dict()
+    for bag_idx, bag in td.bags.items():
+        complexity = reduce(reducer, (values[var] for var in bag))
+        complexities[bag_idx] = complexity
+    return complexities
+
+
+def compute_complexity_width(td: 'TreeDecomposition', domain_sizes: Dict[int, int],
+                             approx=False, include=None) -> int:
+    if include is not None:
+        return max(val for bag_idx, val in compute_complexities(td, domain_sizes, approx).items()
+                   if bag_idx in include)
+    return max(compute_complexities(td, domain_sizes, approx).values())
+
+
+def log_bag_metrics(td: 'TreeDecomposition', domain_sizes: Dict[int, int], append=False):
+    if not domain_sizes: return  # don't run if domain_sizes not provided
+    mode = 'a' if append else 'w'
+    with open("bag_metrics.txt", mode) as outfile:
+        outfile.write(",".join(f"{len(bag)}" for bag in td.bags.values()))
+        outfile.write("\n")
+        outfile.write(",".join(map(str, compute_complexities(td, domain_sizes).values())))
+        outfile.write("\n")
+
+
+
 class NoSolutionException(BaseException): pass
 
 
@@ -240,8 +332,39 @@ class TreeDecomposition(object):
         self.elim_order = order
         self.width = width
         self._bag_ctr = 0
-        self.decomp_from_ordering(graph, order, width)
+        if order is not None:
+            self.decomp_from_ordering(graph, order, width)
 
+    @staticmethod
+    def from_td(tdstr: str):
+        # parse tree decomposition
+        tdlines = tdstr.split("\n")
+        header = tdlines.pop(0)
+        ltype, _, nbags, maxbagsize, nverts = header.split()
+        assert ltype == "s", "invalid header ({ltype}) in tree decomposition"
+
+        self = TreeDecomposition(None, None)
+        self.width = int(maxbagsize) - 1
+        self._bag_ctr = int(nbags) + 1
+
+        for line in tdlines:
+            if not line: continue
+            ltype, rest = line.split(maxsplit=1)
+            if ltype == "c":  # comment line, ignore
+                continue
+            elif ltype == "b":
+                bag_idx, rest = rest.split(maxsplit=1)
+                bag_idx = int(bag_idx)-1
+                bag = frozenset(map(int, rest.split()))
+                self.bags[bag_idx] = bag
+                self.decomp.add_node(bag_idx)
+            else:  # edge of tree decomp
+                u, v = int(ltype), int(rest)
+                self.decomp.add_edge(u-1, v-1)
+
+        self.elim_order = self.recompute_elim_order()
+        return self
+        
     def add_bag(self, nodes: Union[set, frozenset], parent: int = -1):
         nodes = frozenset(nodes)
         bag_idx = self._bag_ctr
@@ -261,10 +384,14 @@ class TreeDecomposition(object):
         else:
             self.width = max_degree
         revorder = order[::-1]
-        cur_nodes = set(revorder[:self.width+1])
+        # try:
+        cur_nodes = {revorder[0]}
+        # except IndexError:
+        #     print("index error", order, revorder)
+        #     return
         root_bag = self.add_bag(cur_nodes)
         blame = {node: root_bag for node in cur_nodes}
-        for u in revorder[self.width+1:]:
+        for u in revorder[1:]:
             cur_nodes.add(u)
             neighbors = set(graph.subgraph(cur_nodes).neighbors(u))
             if neighbors:
@@ -386,7 +513,55 @@ class TreeDecomposition(object):
         elim_order.reverse()
         return elim_order
 
+    def compute_width(self) -> int:
+        """compute treewidth"""
+        return max(map(len, self.bags.values())) - 1
 
+
+class CWDecomposition(TreeDecomposition):
+
+    def __init__(self, graph: nx.Graph, order, width, domain_sizes):
+        # initialize common stuff, exclude order to skip td construction
+        super().__init__(graph, None)
+        self.elim_order = order
+        self.width = width
+        self.domain_sizes = domain_sizes
+        self.rootbag_size = -1
+        self.decomp_from_ordering(graph, order, width, domain_sizes)
+
+    def decomp_from_ordering(self, graph, order, width, domain_sizes):
+        graph, max_degree = filled_in(graph, order)
+        self.width = width
+        revorder = order[::-1]
+        rootbag_complexity, rootbag_size = 1, 0
+        for node in revorder:
+            rootbag_complexity *= domain_sizes[node]
+            if rootbag_complexity > width: break
+            rootbag_size += 1
+        self.rootbag_size = rootbag_size
+        # try:
+        cur_nodes = {revorder[0]}
+        # except IndexError:
+        #     print("index error", order, revorder)
+        #     return
+        cur_nodes = set(revorder[:rootbag_size])
+        root_bag = self.add_bag(cur_nodes)
+        blame = {node: root_bag for node in cur_nodes}
+        for u in revorder[rootbag_size:]:
+            cur_nodes.add(u)
+            neighbors = set(graph.subgraph(cur_nodes).neighbors(u))
+            if neighbors:
+                first_neighbor = find_first_by_order(neighbors, order)
+                parent = blame[first_neighbor]
+            else:
+                parent = root_bag
+            bag_idx = self.add_bag(neighbors | {u}, parent)
+            blame[u] = bag_idx
+        #if __debug__: self.verify()
+
+    def verify(self):
+        raise NotImplementedError
+    
 if __name__ == '__main__':
     g = nx.bull_graph()
     g.add_edges_from([(4, 5), (2, 5)])

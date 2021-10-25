@@ -10,9 +10,10 @@ import shutil
 
 # internal
 from samer_veith import SvEncoding, SelfNamingDict
-from utils import read_bn, read_model, BNData, TreeDecomposition, NoSolutionException
-from utils import pairs, posdict_to_ordering, check_subgraph
+from utils import read_bn, read_model, BNData, TreeDecomposition, NoSolutionException, weights_from_domain_sizes
+from utils import pairs, posdict_to_ordering, check_subgraph, get_domain_sizes
 from blip import TWBayesianNetwork
+from complexity_encoding import SvEncodingWithComplexity
 
 TOP = int(1e15)  # todo: make dynamic
 SOLVER_DIR = "../solvers"
@@ -23,15 +24,16 @@ ROUNDING = 1
 #  maybe Dict[node, Dict[green parent g1, List[red verts upstream from g1]]]
 PSET_ACYC = Dict[Tuple[int, FrozenSet[int]], Set[int]]
 
+
 class TwbnEncoding(SvEncoding):
     def __init__(self, data: BNData, stream, forced_arcs=None,
                  forced_cliques=None, pset_acyc=None, debug=False):
         dummy_graph = nx.Graph()
         dummy_graph.add_nodes_from(data.keys())
+        self.debug = debug
         super().__init__(stream, dummy_graph)
         self.data = data
-        self.debug = debug
-        self.non_improved = True
+        self.non_improved = True  # only use improved for SMT encodings
 
         # sat variables
         self.acyc = None
@@ -153,7 +155,7 @@ class TwbnEncoding(SvEncoding):
             self._add_comment(f"end [slim] forced clique {set(bag)}")
 
     def encode(self):
-        # allow at most one arc (not strictly necessary)
+        # allow at most one arc (redundant, not strictly necessary, speeds up encoding)
         for i,j in pairs(range(self.num_nodes)):
             _i, _j = self.node_reverse_lookup[i], self.node_reverse_lookup[j]
             self._add_comment(f"at most one arc {_i}->{_j} or {_j}->{_i}")
@@ -243,11 +245,18 @@ class TwbnDecoder(object):
 
 
 def solve_bn(data: BNData, treewidth: int, input_file: str, forced_arcs=None,
-             forced_cliques=None, pset_acyc=None, timeout: int = TIMEOUT, debug=False):
+             forced_cliques=None, pset_acyc=None, timeout: int = TIMEOUT,
+             domain_sizes=None, debug=False):
     cnfpath = "temp.cnf"
     with open(cnfpath, 'w') as cnffile:
-        enc = TwbnEncoding(data, cnffile, forced_arcs, forced_cliques,
-                           pset_acyc, debug)
+        if domain_sizes is None:
+            enc = TwbnEncoding(data, cnffile, forced_arcs, forced_cliques,
+                               pset_acyc, debug)
+        else:
+            enc = CwbnEncoding(data, cnffile, forced_arcs, forced_cliques,
+                               pset_acyc, debug)
+            enc.use_dd = True
+            enc.set_weights(weights_from_domain_sizes(domain_sizes))
         enc.encode_sat(treewidth)
     if debug: print("encoding done")
     if debug: print(f"maxsat stats: {len(enc.vars)} vars, {enc.num_clauses} clauses")
@@ -284,7 +293,20 @@ def solve_bn(data: BNData, treewidth: int, input_file: str, forced_arcs=None,
         return dec.get_bn()
 
 
+class CwbnEncoding(TwbnEncoding, SvEncodingWithComplexity):
+    pass
+
+
 if __name__ == '__main__':
     input_file = "child-norm.jkl"
-    bn = solve_bn(read_bn(input_file), 5, input_file)
+    if input("complexity-width? y/[n]:"):
+        print("complexity-width")
+        datfile = "../input/dat/child-5000.dat"
+        domain_sizes = get_domain_sizes(datfile)
+        print("weights:", weights_from_domain_sizes(domain_sizes))
+    else:
+        print("treewidth")
+        domain_sizes = None
+    bn = solve_bn(read_bn(input_file), 5, input_file, timeout=30,
+                  domain_sizes=domain_sizes, debug=False)
     print(bn.score)

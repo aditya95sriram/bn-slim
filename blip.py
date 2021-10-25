@@ -8,8 +8,11 @@ from typing import Optional, Callable, Dict, List
 import re
 import signal
 from glob import glob
+from time import sleep
 
-from utils import filled_in, TreeDecomposition, pairs, stream_bn, get_bn_stats, filter_read_bn
+from utils import filled_in, TreeDecomposition, pairs, stream_bn, get_bn_stats, \
+    filter_read_bn, compute_complexity_width, read_jkl, write_jkl, get_domain_sizes, \
+    CWDecomposition
 
 import matplotlib.pyplot as plt
 from networkx.drawing.nx_agraph import pygraphviz_layout
@@ -19,6 +22,10 @@ SCORE_PATN = re.compile(r"New improvement! (?P<score>[\d.-]+) \(after (?P<time>[
 CHECKPOINT_MINUTES = 30  # in minutes
 CHECKPOINT_INTERVAL = int(CHECKPOINT_MINUTES*60)  # in seconds
 CHECKPOINT_RETRY_INTERVAL = 5  # in seconds
+
+# not that crucial, if you consider the stdout updates of the heuristic as mere
+# triggers for reading new (not necessarily next) bn from .res file
+PARSE_RETRY_INTERVAL = 0.01  # in seconds
 
 
 class BayesianNetwork(object):
@@ -128,9 +135,10 @@ class TWBayesianNetwork(BayesianNetwork):
         if self.tw <= 0:
             self.tw = self.td.width
 
-    def verify(self):
+    def verify(self, verify_treewidth=True):
         super().verify()
-        self.td.verify(graph=self.get_moralized())
+        if verify_treewidth:
+            self.td.verify(graph=self.get_moralized())
 
     def get_triangulated(self, elim_order=None):
         if elim_order is None: elim_order = self.elim_order
@@ -141,8 +149,58 @@ class TWBayesianNetwork(BayesianNetwork):
         return triangulated
 
 
-def parse_res(filename, treewidth, outfile, debug=False) -> TWBayesianNetwork:
-    bn = TWBayesianNetwork(tw=treewidth, input_file=filename)
+class CWBayesianNetwork(TWBayesianNetwork):
+    def __init__(self, input_file, cwidth, datfile, elim_order=None, td=None, *args, **kwargs):
+        super().__init__(input_file, *args, **kwargs)
+        self.tw = cwidth
+        self.elim_order: List[int] = elim_order
+        self._td: Optional[TreeDecomposition] = td
+        self.domain_sizes = get_domain_sizes(datfile)
+
+    def done(self):
+        if self.elim_order is None:
+            self.elim_order = list(nx.topological_sort(self.dag))[::-1]
+        self._td = CWDecomposition(self.get_moralized(), self.elim_order, self.tw, self.domain_sizes)
+
+
+def inject_tuples(basejkl, extra_tuples, destname, strong_injection=False):
+    src = read_jkl(basejkl, normalize=False)
+    inject_count = 0
+    for node, pset in extra_tuples.items():
+        parents, score = pset
+        if strong_injection or parents not in src[node]:
+            src[node][parents] = score
+            inject_count += 1
+    write_jkl(src, destname)
+
+
+def parse_res(filename: str, treewidth: int, outfile: str, cwidth=-1,
+              add_extra_tuples=False, augfile: str = "augmented.jkl",
+              datfile=None, retry=True, debug=False) -> TWBayesianNetwork:
+    """
+    Parse a .res file containing a solution BN. Optionally merge the parent set
+    tuples from the jkl file `filename` and the the res file `outfile` and
+    save as a temporary file `augfile` (only when `add_extra_tuples` is True)
+
+    :param filename: input jkl file
+    :param treewidth: treewidth bound
+    :param outfile: res file containing BN
+    :param cwidth: cwidth bound, use -1 to ignore and simply parse a TWBN
+    :param add_extra_tuples: whether to inject tuples from outfile into filename
+    :param augfile: name of temporary file containing merged set of tuples,
+                    (only applicable if add_extra_tuples is True)
+    :param datfile: path to data file (with header rows)
+    :param retry: keep retrying until file is non-empty
+    :param debug: debugging
+    :return: parsed BN as a TWBayesianNetwork
+    """
+    elim_order = None
+    tuples = []
+    extra_tuples = dict()
+    score = None
+    # keep retrying until file is non-empty
+    while retry and os.path.getsize(outfile) == 0:
+        sleep(PARSE_RETRY_INTERVAL)
     with open(outfile) as out:
         for line in out:
             if not line.strip():
@@ -152,22 +210,54 @@ def parse_res(filename, treewidth, outfile, debug=False) -> TWBayesianNetwork:
                 break
             elif line.startswith("elim-order:"):
                 elim_order = line.split()[1].strip("()").split(",")
-                bn.elim_order = list(map(int, elim_order))
-                if debug: print("elim-order:", bn.elim_order)
+                elim_order = list(map(int, elim_order))
+                if debug: print("elim-order:", elim_order)
             else:
                 vertex, rest = line.split(":")
+                vertex = int(vertex)
                 rest = rest.strip().split()
                 if len(rest) == 1:
                     local_score = float(rest[0])
-                    parents = []
+                    parents = frozenset()
                 else:
                     local_score, parents = rest
-                    parents = parents.strip("()").split(",")
-                bn.add(int(vertex), map(int, parents))
+                    local_score = float(local_score)
+                    parents = frozenset(map(int, parents.strip("()").split(",")))
+                # bn.add(int(vertex), map(int, parents))
+                tuples.append((vertex, parents))
+                if add_extra_tuples:
+                    extra_tuples[vertex] = (parents, local_score)
                 if debug: print(f"v:{vertex}, sc:{local_score}, par:{parents})")
+    if add_extra_tuples:
+        inject_tuples(filename, extra_tuples, augfile, True)
+        if debug: print("temporary merged file saved as", augfile)
+        input_file = augfile
+    else:
+        input_file = filename
+    if cwidth > 0:
+        assert datfile, "datfile needed for cwidth"
+        bn = CWBayesianNetwork(cwidth=cwidth, input_file=input_file, datfile=datfile)
+    else:
+        bn = TWBayesianNetwork(tw=treewidth, input_file=input_file)
+    if elim_order is not None: bn.elim_order = elim_order
+    for node, parents in tuples: bn.add(node, parents)
     bn.done()
-    bn._score = score
+    if score is not None:
+        bn._score = score
+    else:
+        print(f"warning: score not found in {outfile}")
     return bn
+
+
+def parse_res_score(outfile: str):
+    with open(outfile) as out:
+        for line in out:
+            if not line.strip():
+                continue
+            elif line.startswith("Score:"):
+                score = float(line.split()[1].strip())
+                return score
+    return None
 
 
 def write_res(bn: BayesianNetwork, outfile, write_elim_order=False, debug=False):
@@ -186,10 +276,14 @@ def write_res(bn: BayesianNetwork, outfile, write_elim_order=False, debug=False)
         out.write(f"\nScore: {bn.compute_score():.3f}\n")
 
 
-def write_net(bn: BayesianNetwork, datfile, tempprefix="lltemp", debug=False):
-    resfile = f"{tempprefix}.res"
+def write_net(bn: BayesianNetwork, datfile, tempprefix="lltemp",
+              use_res="", debug=False):
     netfile = f"{tempprefix}.net"
-    write_res(bn, resfile)
+    if use_res:
+        resfile = use_res
+    else:
+        resfile = f"{tempprefix}.res"
+        write_res(bn, resfile)
     basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"), "parle"]
     args = ["-d", datfile, "-r", resfile, "-n", netfile]
     cmd = basecmd + args
@@ -248,14 +342,48 @@ def activate_checkpoints(bnprovider, save_as):
 
 
 def monitor_blip(filename, treewidth, logger: Callable, outfile="temp.res",
-                 timeout=10, seed=0, solver="kg", save_as="", debug=False):
+                 timeout=10, seed=0, solver="kg", datfile=None,
+                 cwidth=0, onlyfilter=False, save_as="", debug=False):
+    """
+    Run BLIP in monitoring mode, where each new score update is logged
+
+    :param filename: path to jkl file
+    :param treewidth: treewidth bound (ignored if in CWIDTH_MODE)
+    :param logger: logging function to be used
+    :param outfile: path to .res file containing learned network (volatile)
+    :param timeout: total time limit on blip computation
+    :param seed: random seed passed on to blip
+    :param solver: blip sub-algo to use (for tw: [kg, ka, kmax], cwidth: [old, greedy, max])
+    :param datfile: path to data file (with header rows, for domain sizes)
+    :param cwidth: cwidth bound (if positive, activates CWIDTH_MODE)
+    :param onlyfilter: only use pset filtering algo (ignored if not in CWIDTH_MODE)
+    :param save_as: filepath prefix to use for saving checkpoint solutions
+    :param debug: enable debug mode
+    """
+    CWIDTH_MODE = cwidth > 0
+    if CWIDTH_MODE:
+        assert solver in ("old", "greedy", "max"), \
+            f"invalid solver({solver}) for monitor_blip in CWIDTH_MODE"
+        basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip-cw.jar"),
+                   f"solver.kg.adv", "-v", "1", "-src", f"cwidth-{solver}"]
+        args = ["-j", filename, "-d", datfile, "-w", "0", "-cw", str(cwidth),
+                "-r", outfile, "-t", str(timeout), "-seed", str(seed)]
+        if onlyfilter: args.append("-filter")
+    else:
     basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"),
                f"solver.{solver}", "-v", "1"]
     args = ["-j", filename, "-w", str(treewidth), "-r", outfile,
             "-t", str(timeout), "-seed", str(seed)]
     cmd = basecmd + args
     if debug: print("monitoring blip, cmd:", " ".join(cmd))
-    if save_as: activate_checkpoints(lambda: parse_res(filename, treewidth, outfile), save_as)
+    if save_as:
+        if CWIDTH_MODE:
+            bnprovider = lambda: parse_res(filename, 0, outfile, cwidth=cwidth,
+                                           datfile=datfile)
+        else:
+            bnprovider = lambda: parse_res(filename, treewidth, outfile)
+        activate_checkpoints(bnprovider, save_as)
+    domain_sizes = None if datfile is None else get_domain_sizes(datfile)
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=1,
                           universal_newlines=True) as proc:
         for line in proc.stdout:
@@ -263,7 +391,19 @@ def monitor_blip(filename, treewidth, logger: Callable, outfile="temp.res",
             match = SCORE_PATN.match(line)
             if match:
                 score = float(match['score'])
-                logger({"score": score})
+                logdata = {"score": score}
+                if domain_sizes is not None:
+                    try:
+                        bn = bnprovider()
+                    except IndexError:  # todo: not reached anymore, retries, rethink
+                        print("bn res file invalid (probably got overwritten)")
+                        cw = acw = -1
+                    else:
+                        tw = bn.td.compute_width()
+                        cw = compute_complexity_width(bn.td, domain_sizes)
+                        logdata["tw"] = tw
+                        logdata["cw"] = cw
+                logger(logdata)
     print(f"done returncode: {proc.returncode}")
 
 
@@ -278,6 +418,21 @@ def start_blip_proc(filename, treewidth, outfile="temp.res",
                             universal_newlines=True)
     os.set_blocking(proc.stdout.fileno(), False)  # set stdout to be non-blocking
     if debug: print(f"starting blip proc, pid: {proc.pid}, \ncmd: {cmd}")
+    return proc
+
+
+def start_blip_proc_cw(filename, datfile, cwidth, outfile="temp.res", timeout=10,
+                       seed=0, searcher="greedy", onlyfilter=False, debug=False) -> subprocess.Popen:
+    basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip-cw.jar"),
+               f"solver.kg.adv", "-v", "1", "-src", f"cwidth-{searcher}"]
+    args = ["-j", filename, "-d", datfile, "-w", "0", "-cw", str(cwidth),
+            "-r", outfile, "-t", str(timeout), "-seed", str(seed)]
+    if onlyfilter: args.append(["-filter"])
+    cmd = basecmd + args
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=1,
+                            universal_newlines=True)
+    os.set_blocking(proc.stdout.fileno(), False)  # set stdout to be non-blocking
+    if debug: print(f"starting blip-cw proc, pid: {proc.pid}, \ncmd: {cmd}")
     return proc
 
 
