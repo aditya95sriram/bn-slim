@@ -1,0 +1,325 @@
+diff --git a/Makefile b/Makefile
+index ad98880..bbdffec 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,5 +1,6 @@
+ CXX		  := g++
+-CXX_FLAGS := -Wall -O0 -std=c++98 -g -stdlib=libc++
++#CXX_FLAGS := -Wall -O0 -std=c++98 -g -stdlib=libc++
++CXX_FLAGS := -Wall -O0 -std=c++98 -g
+ RUN_ARGS  := --help
+ 
+ BIN		:= bin
+diff --git a/include/base.h b/include/base.h
+index d5a0973..f7d1d9a 100644
+--- a/include/base.h
++++ b/include/base.h
+@@ -44,6 +44,7 @@
+ #include <memory.h>
+ #include <sys/types.h>
+ #include <sys/timeb.h>
++#include <stddef.h>
+ 
+ // STL kernel
+ #include <iostream>
+@@ -112,4 +113,16 @@
+ #define MERLIN_OUTPUT_UAI	10			///< UAI output format (default)
+ #define MERLIN_OUTPUT_JSON	11			///< JSON output format
+ 
++
++///
++/// Ordering Method for graphical models.
++///
++#define MERLIN_ORDER_MINFILL "MinFill"
++#define MERLIN_ORDER_WTMINFILL "WtMinFill"
++#define MERLIN_ORDER_MINWIDTH "MinWidth"
++#define MERLIN_ORDER_WTMINWIDTH "WtMinWidth"
++#define MERLIN_ORDER_RANDOM "Random"
++#define MERLIN_ORDER_LEX "Lex"
++
++
+ #endif /* IBM_MERLIN_BASE_H_ */
+diff --git a/include/graphical_model.h b/include/graphical_model.h
+index 40e3d12..08c17eb 100644
+--- a/include/graphical_model.h
++++ b/include/graphical_model.h
+@@ -876,7 +876,7 @@ public:
+ 	///
+ 	/// \brief Variable ordering methods.
+ 	///
+-	MER_ENUM( OrderMethod , MinFill,WtMinFill,MinWidth,WtMinWidth,Random );
++	MER_ENUM( OrderMethod , MinFill,WtMinFill,MinWidth,WtMinWidth,Random,Lex );
+ 
+     ///
+     /// \brief Find a variable elimination order.
+@@ -888,10 +888,12 @@ public:
+ 		variable_order_t order;
+ 		order.resize(nvar());
+ 
+-		if (ord_type == OrderMethod::Random) {	// random orders are treated here
++		// random and lex orders are treated here
++		if (ord_type == OrderMethod::Random || ord_type == OrderMethod::Lex) {
+ 			for (size_t i = 0; i < nvar(); i++)
+ 				order[i] = var(i).label();	// build a list of all the variables
+-			std::random_shuffle(order.begin(), order.end());// and randomly permute them
++			if (ord_type == OrderMethod::Random)  // don't shuffle if lex
++				std::random_shuffle(order.begin(), order.end());// and randomly permute them
+ 			return order;						    		// then return
+ 		}
+ 
+@@ -1255,7 +1257,8 @@ public:
+ 		variable_order_t order;
+ 		order.resize(nvar());
+ 
+-		if (ord_type == OrderMethod::Random) {	// random orders are treated here
++		// random orders are treated here
++		if (ord_type == OrderMethod::Random || ord_type == OrderMethod::Lex) {
+ 			variable_order_t sumOrd, maxOrd;
+ 			for (size_t i = 0; i < nvar(); i++) {
+ 				//   build a list of all the variables
+@@ -1263,8 +1266,10 @@ public:
+ 				else sumOrd.push_back(var(i).label());
+ 			}
+ 
+-			std::random_shuffle(sumOrd.begin(), sumOrd.end());//   and randomly permute them
+-			std::random_shuffle(maxOrd.begin(), maxOrd.end());
++			if (ord_type == OrderMethod::Random) {  // don't shuffle if lex
++				std::random_shuffle(sumOrd.begin(), sumOrd.end());//   and randomly permute them
++				std::random_shuffle(maxOrd.begin(), maxOrd.end());
++			}
+ 			size_t i = 0;
+ 			for (size_t j = 0; j < sumOrd.size(); ++j) order[i++] = sumOrd[j];
+ 			for (size_t j = 0; j < maxOrd.size(); ++j) order[i++] = maxOrd[j];
+diff --git a/include/merlin.h b/include/merlin.h
+index e2e93c0..4b49746 100644
+--- a/include/merlin.h
++++ b/include/merlin.h
+@@ -70,6 +70,7 @@ protected:
+ 	double m_threshold;					///< Threshold value
+ 	double m_alpha;						///< Equivalent sample size
+ 	int m_initFactors;					///< Factor initialization method
++	std::string m_order_method;				///< Ordering method
+ 
+ private:
+ 	// Local members:
+@@ -242,6 +243,12 @@ public:
+ 	///
+ 	void set_output_format(int f);
+ 
++	///
++	/// \brief Set ordering method
++	/// \param s  The ordering method
++	///
++	void set_ordering_method(std::string s);
++
+ 	///
+ 	/// \brief Initialize the solver.
+ 	///	\return *true* if succesful and *false* otherwise.
+diff --git a/include/program_options.h b/include/program_options.h
+index e441382..5ab04fc 100644
+--- a/include/program_options.h
++++ b/include/program_options.h
+@@ -58,6 +58,7 @@ struct ProgramOptions {
+ 	double threshold;				///< Tolerance threshold value (default 1e-06)
+ 	double alpha;					///< Equivalent sample size (for Bayesian parameter estimation)
+ 	int initFactors;					///< Initialize the CPTs (for EM learning)
++	std::string orderMethod;				///< Decide elimination ordering (use lex for pre-computed decomposition)
+ 
+ public:
+ 
+@@ -82,6 +83,7 @@ inline ProgramOptions::ProgramOptions() :
+ 		positive(false),
+ 		threshold(1e-6),
+ 		alpha(5.0),
+-		initFactors(MERLIN_INIT_UNIFORM) {};
++		initFactors(MERLIN_INIT_UNIFORM),
++		orderMethod(MERLIN_ORDER_MINFILL) {};
+ 
+ #endif /* IBM_MERLIN_PROGRAM_OPTIONS_H_ */
+diff --git a/src/main.cpp b/src/main.cpp
+index 56a31a2..ad39a1b 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -71,6 +71,7 @@ int main(int argc, char** argv) {
+ 	eng.set_threshold(opt->threshold);
+ 	eng.set_alpha(opt->alpha);
+ 	eng.set_init_factor_method(opt->initFactors);
++	eng.set_ordering_method(opt->orderMethod);
+ 
+ 	// Run the inference
+ 	eng.init();
+diff --git a/src/merlin.cpp b/src/merlin.cpp
+index cb3ac38..5ae8654 100644
+--- a/src/merlin.cpp
++++ b/src/merlin.cpp
+@@ -246,6 +246,14 @@ void Merlin::set_output_format(int f) {
+ 	m_outputFormat = f;
+ }
+ 
++///
++/// \brief Set the ordering method.
++/// \param s	The ordering method.
++///
++void Merlin::set_ordering_method(std::string s) {
++	m_order_method = s;
++}
++
+ ///
+ /// \brief Read the graphical model.
+ /// \param filename	The input file name.
+@@ -690,8 +698,13 @@ void Merlin::check() {
+ 	if (m_task == MERLIN_TASK_PR) {
+ 		if (m_algorithm != MERLIN_ALGO_WMB &&
+ 			m_algorithm != MERLIN_ALGO_BTE) {
+-			std::string err_msg("For PR inference use WMB and BTE algorithms.");
+-			throw std::runtime_error(err_msg);
++			if (m_algorithm == MERLIN_ALGO_IJGP ||
++				m_algorithm == MERLIN_ALGO_CTE) {
++				std::cerr << "[MERLIN WARN] Warning: For PR inference WMB and BTE algorithms are recommended" << std::endl;
++			} else {
++				std::string err_msg("For PR inference use WMB and BTE algorithms.");
++				throw std::runtime_error(err_msg);
++			}
+ 		}
+ 	} else if (m_task == MERLIN_TASK_MAR) {
+ 		if (m_algorithm != MERLIN_ALGO_WMB &&
+@@ -897,7 +910,7 @@ int Merlin::run() {
+ 				merlin::wmb s(fs);
+ 				std::ostringstream oss;
+ 				oss << "iBound=" << m_ibound << ","
+-					<< "Order=MinFill" << ","
++					<< "Order=" << m_order_method << ","
+ 					<< "OrderIter=100" << ","
+ 					<< "Iter=" << m_iterations << ","
+ 					<< "Task=PR,Debug=" << (m_debug ? 1 : 0);
+@@ -907,11 +920,37 @@ int Merlin::run() {
+ 			} else if (m_algorithm == MERLIN_ALGO_BTE) {
+ 				merlin::bte s(fs);
+ 				std::ostringstream oss;
+-				oss << "Order=MinFill" << ","
++				oss << "Order=" << m_order_method << ","
+ 					<< "Task=PR";
+ 				s.set_properties(oss.str());
+ 				s.run();
+ 				s.write_solution(out, m_evidence, old2new, gm, dummies, m_outputFormat);
++			} else if (m_algorithm == MERLIN_ALGO_IJGP) {
++				merlin::ijgp s(fs);
++				std::ostringstream oss;
++				oss << "iBound=" << m_ibound << ","
++						<< "Order=" << m_order_method << ","
++						<< "Iter=" << m_iterations << ","
++						<< "Task=PR,Debug=" << (m_debug ? 1 : 0);
++				s.set_properties(oss.str());
++				s.run();
++				s.write_solution(out, m_evidence, old2new, gm, dummies, m_outputFormat);
++			} else if (m_algorithm == MERLIN_ALGO_CTE) {
++				merlin::cte s(fs);
++				std::ostringstream oss;
++				oss << "Order=" << m_order_method << ","
++						<< "Task=PR,Debug=" << (m_debug ? 1 : 0);
++				s.set_properties(oss.str());
++				std::vector<size_t> qvars;
++				for (size_t i = 0; i < m_query.size(); ++i) {
++					vindex var = m_query[i];
++					vindex nvar = old2new.at(var);
++					qvars.push_back(nvar); // use the new index of the MAP vars
++				}
++				s.set_query(qvars);
++				s.run();
++				std::ofstream out(m_outputFile.c_str());
++				s.write_solution(out, m_evidence, old2new, gm, dummies, m_outputFormat);
+ 			}
+ 
+ 			out.close();
+@@ -935,7 +974,7 @@ int Merlin::run() {
+ 				merlin::wmb s(fs);
+ 				std::ostringstream oss;
+ 				oss << "iBound=" << m_ibound << ","
+-					<< "Order=MinFill" << ","
++					<< "Order=" << m_order_method << ","
+ 					<< "OrderIter=100" << ","
+ 					<< "Iter=" << m_iterations << ","
+ 					<< "Task=MAR,Debug=" << (m_debug ? 1 : 0);
+@@ -946,7 +985,7 @@ int Merlin::run() {
+ 				merlin::ijgp s(fs);
+ 				std::ostringstream oss;
+ 				oss << "iBound=" << m_ibound << ","
+-					<< "Order=MinFill" << ","
++					<< "Order=" << m_order_method << ","
+ 					<< "Iter=" << m_iterations << ","
+ 					<< "Task=MAR,Debug=" << (m_debug ? 1 : 0);
+ 				s.set_properties(oss.str());
+diff --git a/src/program_options.cpp b/src/program_options.cpp
+index a942211..cb2f2fe 100644
+--- a/src/program_options.cpp
++++ b/src/program_options.cpp
+@@ -59,6 +59,7 @@ ProgramOptions* parseCommandLine(int argc, char** argv) {
+ 			("alpha,A", po::value<double>(), "equivalent sample size (default 5.0)")
+ 			("init-factors,F", po::value<std::string>(), "initialize the factors")
+ 			("output-format,O", po::value<std::string>(), "output file format (required)")
++			("order-method,M", po::value<std::string>(), "ordering method: minfill, wtminfill, minwidth, wtminwidth, random, lex (optional, only supported for wmb and ijgp)")
+ 			("help,h", "produces this help message");
+ 
+ 		po::variables_map vm;
+@@ -236,6 +237,29 @@ ProgramOptions* parseCommandLine(int argc, char** argv) {
+ 				throw std::runtime_error(err_msg);
+ 			}
+ 		}
++
++		// parse the ordering method
++		if (vm.count("order-method")) {
++			std::string ord = vm["order-method"].as<std::string>();
++			if (ord.compare("minfill") == 0) {
++				opt->orderMethod = MERLIN_ORDER_MINFILL;
++			} else if (ord.compare("wtminfill") == 0) {
++				opt->orderMethod = MERLIN_ORDER_WTMINFILL;
++			} else if (ord.compare("minwidth") == 0) {
++				opt->orderMethod = MERLIN_ORDER_MINWIDTH;
++			} else if (ord.compare("wtminwidth") == 0) {
++				opt->orderMethod = MERLIN_ORDER_WTMINWIDTH;
++			} else if (ord.compare("random") == 0) {
++				opt->orderMethod = MERLIN_ORDER_RANDOM;
++			} else if (ord.compare("lex") == 0) {
++				opt->orderMethod = MERLIN_ORDER_LEX;
++			} else {
++				std::string err_msg("Unknown Ordering Method ");
++				err_msg += ord;
++				throw std::runtime_error(err_msg);
++			}
++		}
++
+ 	} catch (std::exception& e) {
+ 		std::cerr << e.what() << std::endl;
+ 		delete opt;
+diff --git a/src/wmb.cpp b/src/wmb.cpp
+index a6e967d..304711a 100644
+--- a/src/wmb.cpp
++++ b/src/wmb.cpp
+@@ -47,7 +47,7 @@ void wmb::write_solution(std::ostream& out, const std::map<size_t, size_t>& evid
+ 				out << " \"value\" : " << std::fixed
+ 					<< std::setprecision(MERLIN_PRECISION)
+ 					<< (m_logz + std::log(orig.get_global_const())) << ", ";
+-				out << " \"status\" : \"true\" ";
++				//out << " \"status\" : \"true\", ";
+ 
+ 				if (prob == 0.0) { // probability of evidence is 0
+ 					out << " \"status\" : \"false\", ";
+@@ -321,7 +321,17 @@ void wmb::init() {
+ 
+ 	if (m_order.size() == 0) { // if we need to construct an elimination ordering
+ 		//m_order = m_gmo.order(m_order_method, m_var_types);
+-		m_order = m_gmo.order2(m_order_method, m_var_types);
++
++		// handle lex order and random order here itself
++		switch (m_order_method) {
++			case OrderMethod::Lex:
++			case OrderMethod::Random:
++				m_order = m_gmo.order(m_order_method, m_var_types);
++				break;
++			default:
++				m_order = m_gmo.order2(m_order_method, m_var_types);
++				break;
++		}
+ //			variable_order_t ord;
+ //			size_t min_w = 1000000;
+ //			for (size_t i = 1; i <= m_order_iter; ++i) {

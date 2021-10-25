@@ -1,6 +1,24 @@
-diff -ru blip-publish-pure/compile-blip.sh blip-publish/compile-blip.sh
---- blip-publish-pure/compile-blip.sh	2018-03-06 11:45:06.000000000 +0100
-+++ blip-publish/compile-blip.sh	2020-06-10 02:25:50.289328320 +0200
+diff --git a/api/src/main/java/ch/idsia/blip/api/learn/solver/tw/BrutalGreedyAdvSolverApi.java b/api/src/main/java/ch/idsia/blip/api/learn/solver/tw/BrutalGreedyAdvSolverApi.java
+index 04c24ad..2eda9b5 100644
+--- a/api/src/main/java/ch/idsia/blip/api/learn/solver/tw/BrutalGreedyAdvSolverApi.java
++++ b/api/src/main/java/ch/idsia/blip/api/learn/solver/tw/BrutalGreedyAdvSolverApi.java
+@@ -22,6 +22,12 @@ public class BrutalGreedyAdvSolverApi extends TwSolverApi {
+     @Option(name = "-src", usage = "Advanced searcher")
+     private String searcher;
+ 
++    @Option(name = "-cw", usage = "Complexity width")
++    private int cwidth;
++
++    @Option(name = "-filter", usage = "Only perform score function filtering")
++    private boolean only_filter;
++
+     public static void main(String[] args) {
+         defaultMain(args, new BrutalGreedyAdvSolverApi());
+     }
+diff --git a/compile-blip.sh b/compile-blip.sh
+index 9033b61..319724c 100755
+--- a/compile-blip.sh
++++ b/compile-blip.sh
 @@ -1,19 +1,23 @@
  cd core
  
@@ -10,7 +28,7 @@ diff -ru blip-publish-pure/compile-blip.sh blip-publish/compile-blip.sh
  
  cd ../api
  
-+echo -n "compiling api..."
++echo -n "compiling..."
  mvn clean package -DskipTests -q
 +echo "done"
  
@@ -29,10 +47,11 @@ diff -ru blip-publish-pure/compile-blip.sh blip-publish/compile-blip.sh
  
 -cp blip.jar ../r.blip/inst/java
 +#cp blip.jar ../r.blip/inst/java
-diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/BaseSolver.java blip-publish/core/src/main/java/ch/idsia/blip/core/learn/solver/BaseSolver.java
---- blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/BaseSolver.java	2018-03-06 11:45:06.000000000 +0100
-+++ blip-publish/core/src/main/java/ch/idsia/blip/core/learn/solver/BaseSolver.java	2020-06-10 02:25:50.289328320 +0200
-@@ -7,6 +7,7 @@
+diff --git a/core/src/main/java/ch/idsia/blip/core/learn/solver/BaseSolver.java b/core/src/main/java/ch/idsia/blip/core/learn/solver/BaseSolver.java
+index 3a4a318..2c41fdc 100644
+--- a/core/src/main/java/ch/idsia/blip/core/learn/solver/BaseSolver.java
++++ b/core/src/main/java/ch/idsia/blip/core/learn/solver/BaseSolver.java
+@@ -7,6 +7,7 @@ import ch.idsia.blip.core.common.arcs.Directed;
  import ch.idsia.blip.core.learn.solver.ps.Provider;
  import ch.idsia.blip.core.learn.solver.samp.Sampler;
  import ch.idsia.blip.core.learn.solver.src.Searcher;
@@ -40,7 +59,7 @@ diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/Ba
  import ch.idsia.blip.core.utils.data.array.TDoubleArrayList;
  import ch.idsia.blip.core.utils.other.ParentSet;
  import ch.idsia.blip.core.utils.other.RandomStuff;
-@@ -21,6 +22,7 @@
+@@ -21,6 +22,7 @@ import java.util.concurrent.TimeUnit;
  import java.util.logging.Logger;
  
  import static ch.idsia.blip.core.utils.data.ArrayUtils.sameArray;
@@ -48,7 +67,7 @@ diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/Ba
  import static ch.idsia.blip.core.utils.other.RandomStuff.*;
  
  
-@@ -36,6 +38,9 @@
+@@ -36,6 +38,9 @@ public abstract class BaseSolver extends App {
      // Best structure found yet
      public ParentSet[] best_str;
  
@@ -58,7 +77,7 @@ diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/Ba
      public boolean testAcycility = false;
  
      public int n_var;
-@@ -113,6 +118,8 @@
+@@ -113,6 +118,8 @@ public abstract class BaseSolver extends App {
          }
      }
  
@@ -67,7 +86,7 @@ diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/Ba
      public ParentSet[] go() {
  
          prepare();
-@@ -126,6 +133,8 @@
+@@ -126,6 +133,8 @@ public abstract class BaseSolver extends App {
  
          almost();
  
@@ -76,7 +95,7 @@ diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/Ba
          try {
              ExecutorService es = Executors.newCachedThreadPool();
  
-@@ -133,7 +142,8 @@
+@@ -133,7 +142,8 @@ public abstract class BaseSolver extends App {
                  if (verbose > 0) {
                      logf("Starting %d searcher \n", i);
                  }
@@ -86,7 +105,7 @@ diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/Ba
              }
  
              es.shutdown();
-@@ -248,6 +258,9 @@
+@@ -248,6 +258,9 @@ public abstract class BaseSolver extends App {
              w = getWriter(s);
  
              // writer.graph("Quick Structure: " + printQuick(best_str));
@@ -96,7 +115,7 @@ diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/Ba
  
              // writer.graph("\n\nExpanded Structure: \n\n");
              if (str != null && str.length > 0) {
-@@ -333,6 +346,10 @@
+@@ -333,6 +346,10 @@ public abstract class BaseSolver extends App {
      }
  
      public void newStructure(ParentSet[] new_str) {
@@ -107,7 +126,7 @@ diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/Ba
  
          if (new_str == null) {
              return;
-@@ -371,6 +388,9 @@
+@@ -371,6 +388,9 @@ public abstract class BaseSolver extends App {
  
                  atLeastOne = true;
  
@@ -117,7 +136,7 @@ diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/Ba
                  if (res_path != null) {
                      writeStructure(res_path, best_sk, new_str);
                  }
-@@ -494,7 +514,7 @@
+@@ -494,7 +514,7 @@ public abstract class BaseSolver extends App {
              this.thread = thread;
          }
  
@@ -126,7 +145,7 @@ diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/Ba
  
          @Override
          public void run() {
-@@ -509,7 +529,7 @@
+@@ -509,7 +529,7 @@ public abstract class BaseSolver extends App {
                  ParentSet[] str = src.search();
  
                  // Propose the new solution
@@ -135,10 +154,939 @@ diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/Ba
  
                  checkTime();
              }
-diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalMaxDirectedSearcher.java blip-publish/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalMaxDirectedSearcher.java
---- blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalMaxDirectedSearcher.java	2018-03-06 11:45:06.000000000 +0100
-+++ blip-publish/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalMaxDirectedSearcher.java	2020-06-10 02:25:50.289328320 +0200
-@@ -88,6 +88,7 @@
+diff --git a/core/src/main/java/ch/idsia/blip/core/learn/solver/brtl/BrutalSolver.java b/core/src/main/java/ch/idsia/blip/core/learn/solver/brtl/BrutalSolver.java
+index 647a916..93d7385 100644
+--- a/core/src/main/java/ch/idsia/blip/core/learn/solver/brtl/BrutalSolver.java
++++ b/core/src/main/java/ch/idsia/blip/core/learn/solver/brtl/BrutalSolver.java
+@@ -1,7 +1,9 @@
+ package ch.idsia.blip.core.learn.solver.brtl;
+ 
+ 
++import ch.idsia.blip.core.common.DataSet;
+ import ch.idsia.blip.core.learn.solver.ScoreSolver;
++import ch.idsia.blip.core.learn.solver.ps.CWidthScoreProvider;
+ import ch.idsia.blip.core.learn.solver.ps.MaxScoreProvider;
+ import ch.idsia.blip.core.learn.solver.ps.Provider;
+ import ch.idsia.blip.core.learn.solver.samp.Sampler;
+@@ -9,6 +11,9 @@ import ch.idsia.blip.core.learn.solver.src.Searcher;
+ import ch.idsia.blip.core.learn.solver.src.brutal.*;
+ import ch.idsia.blip.core.utils.other.ParentSet;
+ 
++import static ch.idsia.blip.core.utils.other.RandomStuff.getDataSet;
++import static ch.idsia.blip.core.utils.other.RandomStuff.logn;
++
+ import java.util.HashMap;
+ 
+ import static ch.idsia.blip.core.learn.solver.samp.SamplerUtils.getAdvSampler;
+@@ -21,6 +26,10 @@ public class BrutalSolver extends ScoreSolver {
+ 
+     public int tw;
+ 
++    public int cwidth;
++    private int[] domain_sizes;
++    private boolean only_filter = false;
++
+     public String sampler;
+ 
+     public String searcher;
+@@ -43,7 +52,8 @@ public class BrutalSolver extends ScoreSolver {
+         if (verbose > 0) {
+             log("tw: " + tw + "\n");
+             log("sampler: " + sampler + "\n");
+-            log("sercher: " + searcher + "\n");
++            log("searcher: " + searcher + "\n");
++            log("cwidth: " + cwidth + "\n");
+         }
+     }
+ 
+@@ -51,14 +61,34 @@ public class BrutalSolver extends ScoreSolver {
+     public void init(HashMap<String, String> options) {
+         super.init(options);
+         sampler = gStr("sampler", null);
+-        searcher = gStr("sercher", null);
++        searcher = gStr("searcher", null);
++        only_filter = gBool("only_filter");
+ 
+         tw = gInt("tw", 5);
++        cwidth = gInt("cwidth", -1);
++        if (searcher != null && searcher.startsWith("cwidth") && cwidth >= 2) {
++            // read in domain sizes
++            DataSet data = getDataSet(dat_path);
++            domain_sizes = new int[data.n_var];
++            System.arraycopy(data.l_n_arity, 0, domain_sizes, 0, data.n_var);
++            // find min domain size to estimate appropriate tw bound
++            int min_domain_size = Integer.MAX_VALUE;
++            for (int ds: domain_sizes) min_domain_size = Math.min(min_domain_size, ds);
++            // acts as upper bound for actual tw (to ensure, no missed solutions)
++            // not sure where all tw is being used, hence safe bet to overestimate
++            log("setting tw from cwidth (min domain size: " + min_domain_size + ")\n");
++            // tw = (int) (log2(cwidth) + 1e-11);  // add epsilon before int casting
++            tw = (int) (logn(cwidth, min_domain_size) + 1e-11);  // add epsilon before int casting
++        }
+     }
+ 
+     @Override
+     protected Provider getProvider() {
+-        return new MaxScoreProvider(sc, tw - 1);
++        if (searcher != null && searcher.startsWith("cwidth")) {  // if cwidth mode, use custom score provider
++            return new CWidthScoreProvider(sc, cwidth, domain_sizes);
++        } else {  // otherwise use default provider
++            return new MaxScoreProvider(sc, tw - 1);
++        }
+     }
+ 
+     @Override
+@@ -76,6 +106,15 @@ public class BrutalSolver extends ScoreSolver {
+             return new BrutalMaxDirectedSearcher(this, tw);
+         } else if ("weight".equals(searcher)) {
+             return new BrutalMaxDirectedSearcherWeight(this, tw);
++        } else if ("cwidth-old".equals(searcher)) {
++            return only_filter ? new BrutalOldSearcher(this, tw) :
++                    new BrutalCWidthOldSearcher(this, tw, cwidth, domain_sizes);
++        } else if ("cwidth-greedy".equals(searcher)) {
++            return only_filter ? new BrutalGreedySearcher(this, tw) :
++                    new BrutalCWidthGreedySearcher(this, tw, cwidth, domain_sizes);
++        } else if ("cwidth-max".equals(searcher)) {
++            return only_filter ? new BrutalMaxDirectedSearcher(this, tw) :
++                    new BrutalCWidthMaxDirectedSearcher(this, tw, cwidth, domain_sizes);
+         } else {
+             return new BrutalGreedySearcher(this, tw);
+         }
+diff --git a/core/src/main/java/ch/idsia/blip/core/learn/solver/ps/CWidthScoreProvider.java b/core/src/main/java/ch/idsia/blip/core/learn/solver/ps/CWidthScoreProvider.java
+new file mode 100644
+index 0000000..bbd11de
+--- /dev/null
++++ b/core/src/main/java/ch/idsia/blip/core/learn/solver/ps/CWidthScoreProvider.java
+@@ -0,0 +1,55 @@
++package ch.idsia.blip.core.learn.solver.ps;
++
++
++import ch.idsia.blip.core.utils.other.ParentSet;
++
++import java.util.ArrayList;
++import java.util.List;
++
++import ch.idsia.blip.core.common.DataSet;
++import static ch.idsia.blip.core.utils.other.RandomStuff.getDataSet;
++
++
++public class CWidthScoreProvider extends SimpleProvider {
++
++    private final int cwidth;
++    private final int[] domain_sizes;
++
++    public CWidthScoreProvider(ParentSet[][] sc, int cwidth, int[] domain_sizes) {
++        super(sc);
++        this.cwidth = cwidth;
++        this.domain_sizes = domain_sizes;
++    }
++
++    @Override
++    public ParentSet[][] getParentSets() {
++        ParentSet[][] newPSets = new ParentSet[sc.length][];
++        double complexity;
++
++        for (int i = 0; i < sc.length; i++) {
++            List<ParentSet> aux = new ArrayList<ParentSet>();
++
++            for (ParentSet ps : sc[i]) {
++                complexity = domain_sizes[i];
++                for (int parent : ps.parents) {
++                    complexity *= domain_sizes[parent];
++                }
++                if (complexity <= cwidth) {
++                    aux.add(ps);
++                }
++            }
++
++            if (aux.size() == 0) {  // no parent sets left
++                throw new IllegalArgumentException("no parent sets left after filtering for node " + i +
++                        " (infeasible cwidth bound)");
++            }
++            newPSets[i] = new ParentSet[aux.size()];
++            for (int j = 0; j < aux.size(); j++) {
++                newPSets[i][j] = aux.get(j);
++            }
++        }
++
++        sc = newPSets;
++        return newPSets;
++    }
++}
+diff --git a/core/src/main/java/ch/idsia/blip/core/learn/solver/src/WinObsSearcher.java b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/WinObsSearcher.java
+index 296aafd..1f25887 100644
+--- a/core/src/main/java/ch/idsia/blip/core/learn/solver/src/WinObsSearcher.java
++++ b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/WinObsSearcher.java
+@@ -352,6 +352,7 @@ public class WinObsSearcher extends ObsSearcher {
+ 
+         window = 1;
+         while (window <= max_windows) {
++            if (window > n_var) break;
+             solver.checkTime();
+             if (!solver.still_time) {
+                 return;
+diff --git a/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/AuxSearcher.java b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/AuxSearcher.java
+index a0aec9b..adfbe0c 100644
+--- a/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/AuxSearcher.java
++++ b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/AuxSearcher.java
+@@ -41,6 +41,7 @@ public class AuxSearcher extends WinObsSearcher {
+                         new_parents[j] = pos;
+                     } else {
+                         keep = false;
++                        break;
+                     }
+                 }
+                 if (keep) {
+diff --git a/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalCWidthGreedySearcher.java b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalCWidthGreedySearcher.java
+new file mode 100644
+index 0000000..36915ef
+--- /dev/null
++++ b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalCWidthGreedySearcher.java
+@@ -0,0 +1,141 @@
++package ch.idsia.blip.core.learn.solver.src.brutal;
++
++
++import ch.idsia.blip.core.learn.solver.BaseSolver;
++import ch.idsia.blip.core.utils.data.SIntSet;
++import ch.idsia.blip.core.utils.other.Pair;
++import ch.idsia.blip.core.utils.other.ParentSet;
++import ch.idsia.blip.core.utils.other.RandomStuff;
++
++import java.util.*;
++
++
++/**
++ * Replicates BrutalGreedySearcher but builds on top of
++ * BrutalCWidthOldSearcher instead of BrutalOldSearcher
++ */
++public class BrutalCWidthGreedySearcher extends BrutalCWidthOldSearcher {
++
++    public ArrayList<TreeSet<SIntSet>> assignments;
++
++    public BrutalCWidthGreedySearcher(BaseSolver solver, int tw, int cwidth, int[] domain_sizes) {
++        super(solver, tw, cwidth, domain_sizes);
++    }
++
++    @Override
++    protected void clear() {
++        super.clear();
++
++        assignments = new ArrayList<TreeSet<SIntSet>>(solver.n_var);
++        for (int i = 0; i < solver.n_var; i++) {
++            assignments.add(new TreeSet<SIntSet>());
++        }
++    }
++
++    @Override
++    protected void addHandler(SIntSet sIntSet) {
++        super.addHandler(sIntSet);
++
++        for (int p : sIntSet.set) {
++            assignments.get(p).add(sIntSet);
++        }
++    }
++
++    @Override
++    protected Pair<ParentSet, SIntSet> bestHandler(int v) {
++        int loopcount = 0, numhandles = handles.size();
++
++        for (ParentSet p : m_scores[v]) {
++
++            // for the empty parent set, choose a random handler set
++            if (p.parents.length == 0) {
++                // Take random
++                // todo: finite randomized looping using shuffled indices
++                while (loopcount++ < DERAND_SAFETY * numhandles) {  // safe finite looping but technically incorrect
++                    SIntSet h = rand(handles);
++                    if (bag_complexity(v, h.set) <= cwidth)
++                        return new Pair<ParentSet, SIntSet>(p, h);
++                }
++
++                // if no suitable handle found (modulo random access)
++                return new Pair<ParentSet, SIntSet>(new ParentSet(), new SIntSet());
++            }
++
++            TreeSet<SIntSet> handles = evaluate(v, p);
++
++            if (handles.size() > 0) {
++                SIntSet h = rand(handles);
++
++                return new Pair<ParentSet, SIntSet>(p, h);
++            }
++        }
++
++        return new Pair<ParentSet, SIntSet>(new ParentSet(), new SIntSet());
++    }
++
++    protected TreeSet<SIntSet> evaluate(int v, ParentSet p) {
++
++        // check all the parents in the set have some handles assigned
++        boolean stopNow = false;
++        HashMap<TreeSet<SIntSet>, Integer> handlesAssigned = new HashMap<TreeSet<SIntSet>, Integer>();
++        TreeSet<SIntSet> aux;
++        TreeSet<SIntSet> aux2;  // only cwidth respecting ones kept in this variable
++
++        // Make list of handles assigned to parents variables to make intersect
++        for (int i = 0; i < p.parents.length && !stopNow; i++) {
++            aux = assignments.get(p.parents[i]);
++            aux2 = new TreeSet<SIntSet>();
++            if (aux.size() == 0) {
++                stopNow = true;
++                aux2 = aux;
++            } else { // only for non-empty aux
++                for (SIntSet pset : aux) {  // only retain handles with proper cwidth
++                    if (bag_complexity(v, pset.set) <= cwidth)
++                        aux2.add(pset);
++                }
++            }
++            handlesAssigned.put(aux2, aux2.size());
++        }
++        if (stopNow) {
++            return new TreeSet<SIntSet>();
++        }
++
++        // Sort list of handles by value
++        List<TreeSet<SIntSet>> handlesNew = RandomStuff.sortByValuesList(
++                handlesAssigned);
++        Iterator<TreeSet<SIntSet>> it = handlesNew.iterator();
++
++        // Go on and compute the intersection!
++        TreeSet<SIntSet> good = new TreeSet<SIntSet>();
++
++        good.addAll(it.next());
++        while (it.hasNext()) {
++            good.retainAll(it.next());
++
++            if (good.size() == 0) {
++                break;
++            }
++        }
++
++        return good;
++    }
++
++    protected SIntSet rand(TreeSet<SIntSet> h) {
++        int v = solver.randInt(0, h.size() - 1);
++        Iterator<SIntSet> i = h.iterator();
++
++        while (v > 1) {
++            i.next();
++            v--;
++        }
++        return i.next();
++    }
++
++    public TreeSet<SIntSet> intersect(TreeSet<SIntSet> arr1, TreeSet<SIntSet> arr2) {
++
++        arr1.retainAll(arr2);
++
++        return arr1;
++
++    }
++}
+diff --git a/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalCWidthMaxDirectedSearcher.java b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalCWidthMaxDirectedSearcher.java
+new file mode 100644
+index 0000000..95b8343
+--- /dev/null
++++ b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalCWidthMaxDirectedSearcher.java
+@@ -0,0 +1,408 @@
++package ch.idsia.blip.core.learn.solver.src.brutal;
++
++
++import ch.idsia.blip.core.common.BayesianNetwork;
++import ch.idsia.blip.core.learn.solver.BaseSolver;
++import ch.idsia.blip.core.utils.data.SIntSet;
++import ch.idsia.blip.core.utils.data.common.TIntIterator;
++import ch.idsia.blip.core.utils.data.set.TIntHashSet;
++import ch.idsia.blip.core.utils.exp.CyclicGraphException;
++import ch.idsia.blip.core.utils.other.Clique;
++import ch.idsia.blip.core.utils.other.Pair;
++import ch.idsia.blip.core.utils.other.ParentSet;
++
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.List;
++import java.util.TreeSet;
++
++import static ch.idsia.blip.core.utils.data.ArrayUtils.*;
++import static ch.idsia.blip.core.utils.other.RandomStuff.f;
++import static ch.idsia.blip.core.utils.other.RandomStuff.p;
++
++
++public class BrutalCWidthMaxDirectedSearcher extends BrutalCWidthOldSearcher {
++
++    private TIntHashSet todo;
++
++    private TreeSet<Result> cand;
++
++    private Result[] bests;
++
++    private double[] minSk;
++    private double[] maxSk;
++
++    private int[][] parents;
++
++    public List<Clique> junctTree;
++
++    protected ArrayList<SIntSet> cur_l_a;
++
++    public BrutalCWidthMaxDirectedSearcher(BaseSolver solver, int tw, int cwidth, int[] domain_sizes) {
++        super(solver, tw, cwidth, domain_sizes);
++    }
++
++    @Override
++    public void init(ParentSet[][] scores, int thread) {
++        super.init(scores, thread);
++
++        minSk = new double[n_var];
++        maxSk = new double[n_var];
++
++        for (int i = 0; i < n_var; i++) {
++            int j = m_scores[i].length - 1;
++
++            minSk[i] = m_scores[i][j].sk;
++            maxSk[i] = m_scores[i][0].sk;
++        }
++
++        parents = new int[n_var][];
++
++        for (int i = 0; i < n_var; i++) {
++            TIntHashSet l = new TIntHashSet();
++
++            for (ParentSet ps : scores[i]) {
++                for (int p : ps.parents) {
++                    l.add(p);
++                }
++            }
++
++            parents[i] = l.toArray();
++            Arrays.sort(parents[i]);
++        }
++
++    }
++
++    @Override
++    protected void clear() {
++        super.clear();
++
++        junctTree = new ArrayList<Clique>();
++    }
++
++    // Maximize a network!
++    @Override
++    public ParentSet[] search() {
++
++        // clear all
++        clear();
++
++        chooseClique();
++
++        // p(Arrays.toString(vars));
++        vars = cloneArray(initCl);
++
++        // Prepare structures for best handlers selection
++        initCand();
++
++        // Init the first maximal clique
++        initClique();
++
++        Result res;
++
++        while (!todo.isEmpty()) {
++
++            // Get the best subset of neighborhood - existing handle
++            res = cand.pollFirst();
++
++            done(res.v);
++
++            // pf("Chosen %d - %s\n", res.v, todo.toString());
++
++            // p(res);
++            // p(todo);
++
++            // pf("Chosen %d \n", res.v);
++            finalize(res);
++            vars = addArray(vars, res.v);
++
++            solver.checkTime();
++            if (!solver.still_time) {
++                return null;
++            }
++
++        }
++
++        check();
++
++        // grSolver.propose(new_sk, new_str, junctTree);
++
++        return new_str;
++    }
++
++    private void check() {
++
++        BayesianNetwork b = new BayesianNetwork(new_str);
++
++        try {
++            b.checkAcyclic();
++        } catch (CyclicGraphException e) {
++            solver.log("WHHHHHAAAAT");
++        }
++
++        int cur_complexity;
++        for (Clique cl: junctTree) {
++            cur_complexity = bag_complexity(cl.variables);
++            if (cur_complexity > cwidth) {
++                solver.log("cwidth of " + cwidth + " exceeded by: " + cl.variables.toString() + "(" + cur_complexity + ")");
++                break;
++            }
++        }
++    }
++
++    private void chooseClique() {
++
++        int theChosen = randInt(0, n_var - 1);
++
++        TIntHashSet init = new TIntHashSet();
++
++        init.add(theChosen);
++        int[] cands = cloneArray(parents[theChosen]);
++
++        Arrays.sort(cands);
++
++        int rootbag_complexity = domain_sizes[theChosen];
++
++        // If the chosen has not enough neighbours
++        while (true) {
++            // Add random neighbouring variable
++            int newChosen = -1;  // initial sentinel value (equivalent to null)
++
++            if (cands.length > 0) {
++                for (int loopcount=0; loopcount <= DERAND_SAFETY * cands.length; loopcount++) {
++                    newChosen = cands[randInt(0, cands.length - 1)];
++                    if (rootbag_complexity * domain_sizes[newChosen] <= cwidth) {
++                        cands = reduceArray(cands, newChosen);
++                        break;
++                    }
++                    newChosen = -1;  // reset sentinel if no break
++                }
++            }
++
++            if (newChosen < 0) {
++                for (int loopcount=0; loopcount <= DERAND_SAFETY * n_var; loopcount++) {
++                    newChosen = randInt(0, n_var - 1);
++                    if (rootbag_complexity * domain_sizes[newChosen] <= cwidth && !init.contains(newChosen)) break;
++                    newChosen = -1;  // reset sentinel if no break
++                }
++            }
++
++            if (newChosen < 0) break;  // no valid newChosen found
++
++            rootbag_complexity *= domain_sizes[newChosen];
++            init.add(newChosen);
++            // Add parents to cands
++            for (int p : parents[newChosen]) {
++                if (!init.contains(p) && !find(p, cands)) {
++                    cands = expandArray(cands, p);
++                }
++            }
++        }
++
++        initCl = init.toArray();
++        Arrays.sort(initCl);
++
++        // pf("INITIAL CLIQUE: %s \n", Arrays.toString(vars));
++    }
++
++    private void done(int v) {
++        todo.remove(v);
++        if (bests[v] == null) {
++            p("cdfjds");
++        }
++        cand.remove(bests[v]);
++        bests[v] = null;
++    }
++
++    private void initCand() {
++        // Init list of variables to evaluate
++        todo = new TIntHashSet();
++        cand = new TreeSet<Result>();
++        bests = new Result[n_var];
++
++        for (int v = 0; v < n_var; v++) {
++            todo.add(v);
++            Result r = new Result(v, m_scores[v][m_scores[v].length - 1],
++                    new SIntSet(), 1, null);
++
++            cand.add(r);
++            bests[v] = r;
++        }
++    }
++
++    @Override
++    // Initial handler: best DAG with (1..tw+1) variables
++    protected void initClique() {
++
++        // Find best, do some asobs iterations
++        ParentSet[] best_str = exploreAll();
++
++        // Update parent se
++        for (int v : initCl) {
++            update(v, best_str[v]);
++            done(v);
++        }
++
++        Clique cl = new Clique(initCl, null);
++
++        junctTree.add(cl);
++
++        // Add new handlers
++        cur_l_a = new ArrayList<SIntSet>();
++
++        for (int v : initCl) {
++            SIntSet s = new SIntSet(reduceArray(initCl, v));
++
++            addHandler(s);  // also adds to cur_l_a
++        }
++        // can technically also add the entire initCl as a handle
++        // (CWidthScoreProvider and bestParentSet will ensure cwidth requirement)
++        addHandler(new SIntSet(initCl));
++
++        updateBests(cur_l_a, cl);
++    }
++
++    protected void finalize(Result res) {
++        // update the chosen parent set
++        update(res.v, res.ps);
++
++        // add the new handlers
++        SIntSet orig = res.handle;
++        cur_l_a = new ArrayList<SIntSet>();
++
++		// also adds to cur_l_a
++        addAllHandlers(new SIntSet(expandArray(orig.set, res.v)));
++
++        // can technically also add the entire bag as a handle
++        // (CWidthScoreProvider and bestParentSet will ensure cwidth requirement)
++        addHandler(new SIntSet(expandArray(orig.set, res.v)));
++
++        int[] pars = expandArray(res.handle.set, res.v);
++        Clique cl = new Clique(pars, res.cl);
++
++        junctTree.add(cl);
++
++        updateBests(cur_l_a, cl);
++    }
++
++    private void updateBests(ArrayList<SIntSet> l_a, Clique cl) {
++        // Update best handlers
++        TIntIterator it = todo.iterator();
++
++        while (it.hasNext()) {
++            int v = it.next();
++
++            Pair<ParentSet, SIntSet> r = bestParentSet(v, l_a);
++
++            if (r == null) {
++                continue;
++            }
++
++            ParentSet bestPset = r.getFirst();
++            SIntSet handler = r.getSecond();
++
++            double sk = (bestPset.sk - maxSk[v]) / (minSk[v] - maxSk[v]);
++
++            if (sk < bests[v].sk) {
++                // int ct = cand.size();
++                cand.remove(bests[v]);
++                Result c = new Result(v, bestPset, handler, sk, cl);
++
++                cand.add(c);
++                bests[v] = c;
++                // if (cand.size() != ct)
++                // p("Jkdjfdkfjds!!");
++            }
++        }
++    }
++
++    private Pair<ParentSet, SIntSet> bestParentSet(int v, ArrayList<SIntSet> l_a) {
++        for (ParentSet p : m_scores[v]) {
++
++            for (SIntSet h : l_a) {
++                if (containsAll(p.parents, h.set)) {
++                    if (bag_complexity(v, h.set) <= cwidth)  // only return if cwidth satisfied
++                        return new Pair<ParentSet, SIntSet>(p, h);
++                }
++            }
++        }
++
++        return null;
++    }
++
++    protected class Result implements Comparable<Result> {
++
++        public double sk;
++        public SIntSet handle;
++        public int v;
++        public ParentSet ps;
++        public Clique cl;
++
++        public Result(int v, ParentSet ps, SIntSet handle, double sk, Clique cl) {
++            this.ps = ps;
++            this.v = v;
++            this.handle = handle;
++            this.sk = sk;
++            this.cl = cl;
++        }
++
++        @Override
++        public int compareTo(Result o) {
++            if (sk > o.sk) {
++                return 1;
++            }
++            if (sk < o.sk) {
++                return -1;
++            }
++
++            if (v < o.v) {
++                return 1;
++            }
++            if (v > o.v) {
++                return -1;
++            }
++
++            if (equals(o)) {
++                return 0;
++            } else {
++                return -1;
++            }
++        }
++
++        // @Override
++        // public boolean equals(Object o) {
++        // if (this == o) return true;
++        // if (o == null || getClass() != o.getClass()) return false;
++        //
++        // Result result = (Result) o;
++        //
++        // if (v != result.v) return false;
++        // if (handle != null ? !handle.equals(result.handle) : result.handle != null) return false;
++        // return Arrays.equals(neigh, result.neigh);
++        // }
++        //
++        // @Override
++        // public int hashCode() {
++        // int result = handle != null ? handle.hashCode() : 0;
++        // result = 31 * result + v;
++        // result = 31 * result + Arrays.hashCode(neigh);
++        // return result;
++        // }
++
++        @Override
++        public String toString() {
++            return f("%d %s %s %.4f", v, ps.toString(),
++                    Arrays.toString(handle.set), sk);
++        }
++    }
++
++    // same as addHandler, but also adds to cur_l_a
++    @Override
++    protected void addHandler(SIntSet sIntSet) {
++        if (bag_complexity(sIntSet.set) * min_domain_size <= cwidth) { // only add handle if cwidth will be satisfied
++            handles.add(sIntSet);
++            cur_l_a.add(sIntSet);
++        }
++    }
++
++}
+diff --git a/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalCWidthOldSearcher.java b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalCWidthOldSearcher.java
+new file mode 100644
+index 0000000..ad4eb52
+--- /dev/null
++++ b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalCWidthOldSearcher.java
+@@ -0,0 +1,178 @@
++package ch.idsia.blip.core.learn.solver.src.brutal;
++
++import ch.idsia.blip.core.learn.solver.BaseSolver;
++import ch.idsia.blip.core.utils.data.SIntSet;
++import ch.idsia.blip.core.utils.other.Pair;
++import ch.idsia.blip.core.utils.other.ParentSet;
++
++import java.util.HashSet;
++
++import static ch.idsia.blip.core.utils.data.ArrayUtils.reduceAndIncreaseArray;
++import static ch.idsia.blip.core.utils.data.ArrayUtils.reduceArray;
++import static ch.idsia.blip.core.utils.data.ArrayUtils.expandArray;
++
++
++// ultra root searcher class, everything else (cwidth-based) is built on top of this class
++public class BrutalCWidthOldSearcher extends BrutalOldSearcher {
++
++    public final int cwidth;
++    protected final int[] domain_sizes;
++    protected int min_domain_size, max_domain_size;
++
++    // number of times to randomly sample before assuming that an array is exhausted (as a multiple of array size)
++    protected final int DERAND_SAFETY = 2;
++
++    public BrutalCWidthOldSearcher(BaseSolver solver, int tw, int cwidth, int[] domain_sizes) {
++        super(solver, tw);
++        this.cwidth = cwidth;
++        this.domain_sizes = domain_sizes;
++        min_domain_size = Integer.MAX_VALUE;
++        max_domain_size = Integer.MIN_VALUE;
++        for (int ds: domain_sizes) {
++            if (ds > max_domain_size) max_domain_size = ds;
++            if (ds < min_domain_size) min_domain_size = ds;
++        }
++        if (min_domain_size*min_domain_size > cwidth)
++            throw new IllegalArgumentException("infeasible cwidth(" + cwidth + ") requested, min domain size=" + min_domain_size);
++    }
++
++    // return the product of domain sizes of intset
++    protected int bag_complexity(int[] pset) {
++        int complexity = 1;
++        for (int parent: pset) complexity *= domain_sizes[parent];
++        return complexity;
++    }
++
++    // return the bag complexity of node v having pset as parents
++    protected int bag_complexity(int v, int[] pset) {
++        return domain_sizes[v] * bag_complexity(pset);
++    }
++
++    // Greedily optimize a network!
++    // exactly the same as BrutalOldSearcher.search, except,
++    // it works with initCl.length instead of assuming tw+1
++    @Override
++    public ParentSet[] search() {
++
++        vars = smp.sample();
++
++        // clear all
++        clear();
++
++        // Init the first maximal clique
++        initClique();
++
++        if (initCl == null || initCl.length <= 0)  // couldn't find non-empty initial clique, abort iteration
++            return null;
++
++        Pair<ParentSet, SIntSet> res;
++
++        // For every new variable, add a new maximal clique
++        for (int i = initCl.length; i < n_var; i++) {
++            int v = vars[i];
++
++            // Search the best parent set given the handlers
++            // (best parent set inside available quasi-maximal cliques)
++            res = bestHandler(v);
++            // update the chosen parent set
++            update(v, res.getFirst());
++            // add the new handlers
++            // add new handler = new clique within complexity width (courtesy CWidthScoreProvider)
++            // created  just now
++            SIntSet h = res.getSecond();
++
++            addAllHandlers(new SIntSet(expandArray(h.set, v)));
++
++            // can technically also add the entire bag as a handle
++            // (CWidthScoreProvider and bestHandler will ensure cwidth requirement)
++            addHandler(new SIntSet(expandArray(h.set, v)));
++
++            solver.checkTime();
++            if (!solver.still_time) {
++                return null;
++            }
++
++        }
++
++        return new_str;
++    }
++
++    @Override
++    void initClique() {
++        // figure out initial suborder that fits within cwidth
++        int rootbag_complexity = 1, rootbag_size = 0;
++        for (int i=0; i<tw; i++) {
++            rootbag_complexity *= domain_sizes[vars[i]];
++            if (rootbag_complexity > cwidth) break;
++            rootbag_size++;
++        }
++
++        if (rootbag_size == 0) return;  // couldn't find non-empty rootbag
++
++        // Initial handler: best DAG with (1..rootbag_size) variables
++        initCl = new int[rootbag_size];
++        System.arraycopy(vars, 0, initCl, 0, rootbag_size);
++
++        // Find best, do some asobs iterations
++        ParentSet[] best_str = exploreAll();
++
++        // Update parent se
++        for (int v : initCl) {
++            update(v, best_str[v]);
++        }
++
++        // Add new handlers
++        addAllHandlers(new SIntSet(initCl));
++
++        // can technically also add the entire initCl as a handle
++        // (CWidthScoreProvider and bestHandler will ensure cwidth requirement)
++        addHandler(new SIntSet(initCl));
++    }
++
++    // same as BrutalOldSearcher.addHandler, but additionally checks cwidth requirement
++    @Override
++    protected void addHandler(SIntSet sIntSet) {
++        if (bag_complexity(sIntSet.set) * min_domain_size <= cwidth)  // only add handle if cwidth will be satisfied
++            handles.add(sIntSet);
++    }
++
++    // same as BrutalOldSearcher.bestHandler, but additionally checks cwidth requirement
++    @Override
++    protected Pair<ParentSet, SIntSet> bestHandler(int v) {
++
++        for (ParentSet p : m_scores[v]) {
++
++            for (SIntSet h : handles) {
++                if (containsAll(p.parents, h.set)) {
++                    if (bag_complexity(v, h.set) <= cwidth)  // only return if cwidth satisfied
++                        return new Pair<ParentSet, SIntSet>(p, h);
++                }
++            }
++        }
++
++        return new Pair<ParentSet, SIntSet>(new ParentSet(), new SIntSet());
++
++    }
++
++    // add all possible subsets of set s as handlers, with some optimizations
++    protected void addAllHandlers(SIntSet s, HashSet<SIntSet> visited) {
++        SIntSet newset;
++        // base case
++        if (s.set.length <= 1)  return;
++        // recurse otherwise
++        for (int v: s.set) {
++            newset = new SIntSet(reduceArray(s.set, v));
++            if (!visited.contains(newset)) {
++                addHandler(newset);  // add this set
++                visited.add(newset);
++                // check if subsets need to be explored
++                if (bag_complexity(newset.set) * max_domain_size > cwidth)
++                    addAllHandlers(newset, visited);
++            }
++        }
++    }
++
++    protected void addAllHandlers(SIntSet s) {
++        addAllHandlers(s, new HashSet<SIntSet>());
++    }
++}
+diff --git a/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalMaxDirectedSearcher.java b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalMaxDirectedSearcher.java
+index fd885b5..e45ba55 100644
+--- a/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalMaxDirectedSearcher.java
++++ b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalMaxDirectedSearcher.java
+@@ -88,6 +88,7 @@ public class BrutalMaxDirectedSearcher extends BrutalOldSearcher {
          chooseClique();
  
          // p(Arrays.toString(vars));
@@ -146,7 +1094,7 @@ diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/sr
  
          // Prepare structures for best handlers selection
          initCand();
-@@ -111,6 +112,7 @@
+@@ -111,6 +112,7 @@ public class BrutalMaxDirectedSearcher extends BrutalOldSearcher {
  
              // pf("Chosen %d \n", res.v);
              finalize(res);
@@ -154,3 +1102,30 @@ diff -ru blip-publish-pure/core/src/main/java/ch/idsia/blip/core/learn/solver/sr
  
              solver.checkTime();
              if (!solver.still_time) {
+diff --git a/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalOldSearcher.java b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalOldSearcher.java
+index 0e21ad3..ad99033 100644
+--- a/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalOldSearcher.java
++++ b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalOldSearcher.java
+@@ -189,6 +189,7 @@ public class BrutalOldSearcher extends ScoreSearcher {
+         // (list of quasi-maximal cliques, where a variable
+         // can choose its parent sets)
+         handles = new TreeSet<SIntSet>();
++        initCl = null;
+     }
+ 
+     protected void update(int v, ParentSet ps) {
+diff --git a/core/src/main/java/ch/idsia/blip/core/utils/other/RandomStuff.java b/core/src/main/java/ch/idsia/blip/core/utils/other/RandomStuff.java
+index f7afaae..a8911de 100644
+--- a/core/src/main/java/ch/idsia/blip/core/utils/other/RandomStuff.java
++++ b/core/src/main/java/ch/idsia/blip/core/utils/other/RandomStuff.java
+@@ -233,6 +233,10 @@ public class RandomStuff {
+         return fact;
+     }
+ 
++    public static double logn(int n, int base) {
++        return Math.log(n) / Math.log(base);
++    }
++
+     public static String printOrdMap(Map<Integer, Integer> map) {
+         String stri = "{ ";
+         boolean first = true;
