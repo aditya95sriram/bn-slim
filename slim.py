@@ -671,7 +671,6 @@ if __name__ == '__main__':
     if args.start_with is not None:
         START_WITH = os.path.abspath(args.start_with)
     TRAV_STRAT = args.traversal_strategy
-    SAVE_AS = os.path.abspath(args.save_as) if args.save_as else ""
     logger = lambda x: x  # no op
     # logger = lambda x: print(f"log: {x}")  # local log
     LOGGING = args.logging
