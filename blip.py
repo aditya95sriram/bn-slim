@@ -370,10 +370,10 @@ def monitor_blip(filename, treewidth, logger: Callable, outfile="temp.res",
                 "-r", outfile, "-t", str(timeout), "-seed", str(seed)]
         if onlyfilter: args.append("-filter")
     else:
-    basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"),
-               f"solver.{solver}", "-v", "1"]
-    args = ["-j", filename, "-w", str(treewidth), "-r", outfile,
-            "-t", str(timeout), "-seed", str(seed)]
+        basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"),
+                   f"solver.{solver}", "-v", "1"]
+        args = ["-j", filename, "-w", str(treewidth), "-r", outfile,
+                "-t", str(timeout), "-seed", str(seed)]
     cmd = basecmd + args
     if debug: print("monitoring blip, cmd:", " ".join(cmd))
     if save_as:
