@@ -45,6 +45,7 @@ def elem_apply(fns, elems):
     element-wise"""
     return map(lambda a, b: a(b), fns, elems)
 
+
 def posdict_to_ordering(positions: dict):
     ordering = [-1]*len(positions)
     for elem, pos in positions.items():
@@ -257,6 +258,43 @@ def log_bag_metrics(td: 'TreeDecomposition', domain_sizes: Dict[int, int], appen
         outfile.write(",".join(map(str, compute_complexities(td, domain_sizes).values())))
         outfile.write("\n")
 
+
+# constrained bnsl related functions
+
+def read_constraints(conpath: str, typecast_node=None):
+    constraints = dict(posarc=[], negarc=[], undarc=[],
+                       posanc=[], neganc=[], undanc=[])
+    with open(conpath) as confile:
+        for line in confile:
+            typ, u, v = line.split()
+            if typecast_node is not None:
+                constraints[typ].append((typecast_node(u), typecast_node(v)))
+            else:
+                constraints[typ].append((u, v))
+    return constraints
+
+
+def num_satisfied_constraints(bn, constraints):
+    parents = {node: set(bn.dag.predecessors(node)) for node in bn.dag}
+    ancestors = {node: set(nx.ancestors(bn.dag, node)) for node in bn.dag}
+
+    base_checkers = {"arc": (lambda u, v: u in parents[v]),
+                     "anc": (lambda u, v: u in ancestors[v])}
+
+    num_satisfied = 0
+    for typ, cons in constraints.items():
+        if not cons: continue
+        subtyp, basetyp = typ[:3], typ[3:]
+        if subtyp == "neg":
+            checker = lambda u, v: not base_checkers[basetyp](u, v)
+        elif subtyp == "und":
+            checker = lambda u, v: (base_checkers[basetyp](u, v) or base_checkers[basetyp](v, u))
+        else:
+            checker = base_checkers[basetyp]
+        cur_satisfied = sum(map(checker, *zip(*cons)))
+        print(f"{typ} satisfied: {cur_satisfied}/{len(cons)}")
+        num_satisfied += cur_satisfied
+    return num_satisfied
 
 
 class NoSolutionException(BaseException): pass
@@ -563,9 +601,19 @@ class CWDecomposition(TreeDecomposition):
         raise NotImplementedError
     
 if __name__ == '__main__':
-    g = nx.bull_graph()
-    g.add_edges_from([(4, 5), (2, 5)])
-    ordering = list(range(len(g)))
-    fgraph = filled_in(g, ordering)
-    td = TreeDecomposition(g, ordering, 3)
-    td.draw()
+    from blip import parse_res
+    bn = parse_res("../input/alarm-5000.jkl", 4, "../past-work/blip-publish/tmp.res")
+    #bn = parse_res("../input/sachs-5000.jkl", 4, "../past-work/blip-publish/tmp.res")
+    constraints = read_constraints("../input/constraint-files/alarm-20-1.con", int)
+    #constraints = read_constraints("../input/constraint-files/sachs-20-4.con", int)
+    total_constraints = sum(map(len, constraints.values()))
+    print("total constraints:", total_constraints)
+    print("satisfied constraints:", num_satisfied_constraints(bn, constraints))
+    print({t: len(v) for t,v in constraints.items()})
+
+    # g = nx.bull_graph()
+    # g.add_edges_from([(4, 5), (2, 5)])
+    # ordering = list(range(len(g)))
+    # fgraph = filled_in(g, ordering)
+    # td = TreeDecomposition(g, ordering, 3)
+    # td.draw()
