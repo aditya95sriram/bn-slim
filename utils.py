@@ -5,7 +5,7 @@ import networkx as nx
 import itertools
 import random
 from typing import Union, Tuple, Dict, List, Iterator, FrozenSet, TextIO, Set, \
-    Any
+    Any, Iterable
 import sys, os
 from operator import itemgetter
 from functools import reduce
@@ -32,6 +32,12 @@ def pairs(obj):
     """return all unordered pairs made from
     distinct elements of obj"""
     return itertools.combinations(obj, 2)
+
+
+def opairs(obj):
+    """return all ordered pairs made from
+    distinct elements of obj"""
+    return itertools.permutations(obj, 2)
 
 
 def ord_triples(obj):
@@ -98,6 +104,10 @@ Psets = Dict[FrozenSet[int], float]
 BNStream = Iterator[Tuple[int, Psets]]
 BNData = Dict[int, Psets]
 
+# constrained bn datatype
+Constraints = Dict[str, List[Tuple]]
+IntPairs = Iterable[Tuple[int, int]]
+
 
 def stream_jkl(filename: str, normalize=True):
     reader = FileReader(filename, ignore="#")
@@ -152,6 +162,19 @@ def stream_bn(filename: str, normalize=True) -> BNStream:
 
 def read_bn(filename: str, normalize=True) -> BNData:
     return dict(stream_bn(filename, normalize))
+
+
+def remove_zero_weight_parents(bndata: BNData, debug=True) -> BNData:
+    """removes non-trivial psets whose score will get rounded down to zero"""
+    newbndata: BNData = dict()
+    for v, psets in bndata.items():
+        newbndata[v]: Psets = {pset: score for pset, score in psets.items()
+                               if int(score) > 0 or len(pset) == 0}
+    if debug:
+        oldpsets = sum(map(len, bndata.values()))
+        newpsets = sum(map(len, newbndata.values()))
+        print(f"removed {oldpsets-newpsets} zero weighted parents")
+    return newbndata
 
 
 def num_nodes_bn(filename: str) -> int:
@@ -261,9 +284,16 @@ def log_bag_metrics(td: 'TreeDecomposition', domain_sizes: Dict[int, int], appen
 
 # constrained bnsl related functions
 
-def read_constraints(conpath: str, typecast_node=None):
-    constraints = dict(posarc=[], negarc=[], undarc=[],
-                       posanc=[], neganc=[], undanc=[])
+def read_constraints(conpath: str, typecast_node=None) -> Constraints:
+    """
+    read constraints from .con file (custom file format)
+
+    :param conpath: path to .con file
+    :param typecast_node: type to convert node names to (typically int)
+    :return: dict with constraint types as keys and list of tuples of variables as values
+    """
+    constraints: Constraints = dict(posarc=[], negarc=[], undarc=[],
+                                    posanc=[], neganc=[], undanc=[])
     with open(conpath) as confile:
         for line in confile:
             typ, u, v = line.split()
@@ -274,14 +304,14 @@ def read_constraints(conpath: str, typecast_node=None):
     return constraints
 
 
-def num_satisfied_constraints(bn, constraints):
+def count_satisfied_constraints(bn, constraints):
     parents = {node: set(bn.dag.predecessors(node)) for node in bn.dag}
     ancestors = {node: set(nx.ancestors(bn.dag, node)) for node in bn.dag}
 
     base_checkers = {"arc": (lambda u, v: u in parents[v]),
                      "anc": (lambda u, v: u in ancestors[v])}
 
-    num_satisfied = 0
+    counts = dict.fromkeys(constraints, 0)
     for typ, cons in constraints.items():
         if not cons: continue
         subtyp, basetyp = typ[:3], typ[3:]
@@ -292,20 +322,58 @@ def num_satisfied_constraints(bn, constraints):
         else:
             checker = base_checkers[basetyp]
         cur_satisfied = sum(map(checker, *zip(*cons)))
-        print(f"{typ} satisfied: {cur_satisfied}/{len(cons)}")
-        num_satisfied += cur_satisfied
-    return num_satisfied
+        # print(f"{typ} satisfied: {cur_satisfied}/{len(cons)}")
+        counts[typ] = cur_satisfied
+    return counts
+
+
+def total_satisfied_constraints(bn, constraints):
+    splits = count_satisfied_constraints(bn, constraints)
+    return sum(splits.values())
+
+
+def filter_satisfied_constraints(bn, constraints, debug=False) -> Constraints:
+    satisfied = {typ: [] for typ in constraints}
+    parents = {node: set(bn.dag.predecessors(node)) for node in bn.dag}
+    ancestors = {node: set(nx.ancestors(bn.dag, node)) for node in bn.dag}
+
+    base_checkers = {"arc": (lambda u, v: u in parents[v]),
+                     "anc": (lambda u, v: u in ancestors[v])}
+
+    counts = dict.fromkeys(constraints, 0)
+    for typ, cons in constraints.items():
+        satisfied[typ] = []
+        if not cons: continue
+        subtyp, basetyp = typ[:3], typ[3:]
+        if subtyp == "neg":
+            checker = lambda u, v: not base_checkers[basetyp](u, v)
+        elif subtyp == "und":
+            checker = lambda u, v: (base_checkers[basetyp](u, v) or base_checkers[basetyp](v, u))
+        else:
+            checker = base_checkers[basetyp]
+        for u, v in cons:
+            if checker(u, v): satisfied[typ].append((u, v))
+    if debug:
+        old_total = sum(map(len, constraints.values()))
+        new_total = sum(map(len, satisfied.values()))
+        print(f"filtered constraints {old_total} -> {new_total}")
+    return satisfied
 
 
 class NoSolutionException(BaseException): pass
+class UnsatisfiableInstance(BaseException): pass
 
 
 def read_model(output: Union[str, TextIO]) -> set:
+    status = ""
+    model = None
     if isinstance(output, str):
         output = output.split("\n")
     for line in output:
         if line.startswith("v"):
             return set(map(int, line.split()[1:]))
+        if "UNSATISFIABLE" in line:  # only if model not found
+            raise UnsatisfiableInstance
     # if model found, this line should not be reached
     if isinstance(output, TextIO): output.seek(0)
     with open("err-output.log", 'w') as err_out:
@@ -314,9 +382,19 @@ def read_model(output: Union[str, TextIO]) -> set:
     raise NoSolutionException("model not found (no line starting with 'v'\n\t"
                               "output written to err-output.log")
 
+
 def read_model_from_file(filename: str) -> set:
     with open(filename) as out:
         return read_model(out)
+
+
+def is_optimal(output: Union[str, TextIO]) -> bool:
+    if isinstance(output, str):
+        output = output.split("\n")
+    for line in output:
+        if line.strip() == "s OPTIMUM FOUND":
+            return True
+    return False
 
 
 # treewidth related functions
@@ -606,9 +684,10 @@ if __name__ == '__main__':
     #bn = parse_res("../input/sachs-5000.jkl", 4, "../past-work/blip-publish/tmp.res")
     constraints = read_constraints("../input/constraint-files/alarm-20-1.con", int)
     #constraints = read_constraints("../input/constraint-files/sachs-20-4.con", int)
+    print("satisfied splits:", count_satisfied_constraints(bn, constraints))
+    print("satisfied total:", total_satisfied_constraints(bn, constraints))
     total_constraints = sum(map(len, constraints.values()))
     print("total constraints:", total_constraints)
-    print("satisfied constraints:", num_satisfied_constraints(bn, constraints))
     print({t: len(v) for t,v in constraints.items()})
 
     # g = nx.bull_graph()

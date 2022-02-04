@@ -9,10 +9,11 @@ import re
 import signal
 from glob import glob
 from time import sleep
+from itertools import islice
 
 from utils import filled_in, TreeDecomposition, pairs, stream_bn, get_bn_stats, \
     filter_read_bn, compute_complexity_width, read_jkl, write_jkl, get_domain_sizes, \
-    CWDecomposition
+    CWDecomposition, Constraints, count_satisfied_constraints, total_satisfied_constraints
 
 import matplotlib.pyplot as plt
 from networkx.drawing.nx_agraph import pygraphviz_layout
@@ -161,6 +162,62 @@ class CWBayesianNetwork(TWBayesianNetwork):
         if self.elim_order is None:
             self.elim_order = list(nx.topological_sort(self.dag))[::-1]
         self._td = CWDecomposition(self.get_moralized(), self.elim_order, self.tw, self.domain_sizes)
+
+
+class ConstrainedBayesianNetwork(TWBayesianNetwork):
+    def __init__(self, constraints: Constraints, input_file, tw=0,
+                 elim_order=None, td=None, *args, **kwargs):
+        super().__init__(input_file, tw, elim_order, td, *args, **kwargs)
+        self.constraints = constraints
+        self.total_constraints = sum(map(len, constraints.values()))
+
+    @staticmethod
+    def fromTwBayesianNetwork(twbn: TWBayesianNetwork, constraints: Constraints):
+        return ConstrainedBayesianNetwork(constraints, twbn.input_file, twbn.tw,
+                                          twbn.elim_order, twbn.td,
+                                          parents=twbn.parents)
+
+    def count_satisfied_constraints(self):
+        return count_satisfied_constraints(self, self.constraints)
+
+    def total_satisfied_constraints(self):
+        return total_satisfied_constraints(self, self.constraints)
+
+    def find_overlapping_relatives(self, node, seen: set, ancestors=True):
+        """find ancestors/descendants of node overlapping set seen"""
+        overlap = set()
+        queue = [node]
+        visited = set()
+        relative = self.dag.predecessors if ancestors else self.dag.successors
+        while queue:
+            cur = queue.pop(0)
+            visited.add(cur)
+            for nbr in relative(cur):
+                if nbr in visited: continue
+                if nbr in seen:
+                    if ancestors:  # if ancestor add internal node
+                        overlap.add(nbr)
+                    else:          # else add parent of internal node
+                        overlap.add(cur)
+                else:
+                    queue.append(nbr)
+        return overlap
+
+    def find_random_overlapping_descendant(self, node, seen: set):
+        overlap = self.find_overlapping_relatives(node, seen, ancestors=False)
+        if not overlap: return None
+        overlap = list(overlap)
+        random.shuffle(overlap)
+        chosen = overlap.pop()
+        nbrs = list(self.dag.successors(chosen))
+        random.shuffle(nbrs)
+        rand_nbr = nbrs.pop()
+        return chosen, rand_nbr
+
+    def find_paths(self, src, dest, k=1):
+        """return upto k paths between src and dest"""
+        paths = nx.shortest_simple_paths(self.dag, src, dest)
+        return islice(paths, k)
 
 
 def inject_tuples(basejkl, extra_tuples, destname, strong_injection=False):
@@ -465,6 +522,12 @@ def stop_blip_proc(proc: subprocess.Popen):
     if proc.stderr is not None: proc.stderr.close()
     if proc.stdin is not None: proc.stdin.close()
     proc.wait()
+
+
+def print_bn(bn: BayesianNetwork):
+    for node, pset in bn.parents.items():
+        score = bn.compute_all_scores({node})[node]
+        print(f"{node}: {score:.2f} ({','.join(map(str,pset))})")
 
 
 if __name__ == '__main__':

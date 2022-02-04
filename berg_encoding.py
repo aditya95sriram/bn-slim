@@ -11,7 +11,7 @@ import shutil
 # internal
 from samer_veith import SvEncoding, SelfNamingDict
 from utils import read_bn, read_model, BNData, TreeDecomposition, NoSolutionException, weights_from_domain_sizes
-from utils import pairs, posdict_to_ordering, check_subgraph, get_domain_sizes
+from utils import pairs, opairs, posdict_to_ordering, check_subgraph, get_domain_sizes
 from blip import TWBayesianNetwork
 from complexity_encoding import SvEncodingWithComplexity
 
@@ -48,6 +48,12 @@ class TwbnEncoding(SvEncoding):
         pset_acyc = dict() if pset_acyc is None else pset_acyc
         self.pset_acyc: PSET_ACYC = pset_acyc
         self.rounding: int = ROUNDING
+
+    def nodepairs(self):
+        return pairs(range(self.num_nodes))
+
+    def nodeopairs(self):
+        return opairs(range(self.num_nodes))
 
     def _add_clause(self, *args, weight=TOP):
         # use TOP if no weight specified (hard clauses)
@@ -86,6 +92,8 @@ class TwbnEncoding(SvEncoding):
                 weight = self.rounding * int(score / self.rounding)
                 if len(p) != 0 and weight == 0:  # causes floating point exception in solver
                     self._add_comment(f"skipping, because non-trivial parent with weight 0")
+                    # self._add_comment(f"forcing false")
+                    # self._add_clause(-self.par[v][p])
                     continue
                 self._add_clause(self.par[v][p], weight=weight)
 
@@ -156,7 +164,7 @@ class TwbnEncoding(SvEncoding):
 
     def encode(self):
         # allow at most one arc (redundant, not strictly necessary, speeds up encoding)
-        for i,j in pairs(range(self.num_nodes)):
+        for i,j in self.nodepairs():
             _i, _j = self.node_reverse_lookup[i], self.node_reverse_lookup[j]
             self._add_comment(f"at most one arc {_i}->{_j} or {_j}->{_i}")
             self._add_clause(-self.arc[i][j], -self.arc[j][i])
@@ -228,9 +236,10 @@ class TwbnDecoder(object):
             for p in self.encoder.par[v]:
                 var = self.encoder.par[v][p]
                 if var in self.model:
-                    assert _v not in parents, "invalid model, two parent sets assigned"
+                    assert _v not in parents, "invalid model, two parent sets " \
+                                              f"assigned to {_v}"
                     parents[_v] = p
-            assert _v in parents, "invalid model, no parent set assigned"
+            assert _v in parents, f"invalid model, no parent set assigned to {_v}"
         return parents
 
     def get_bn(self):
