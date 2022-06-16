@@ -164,12 +164,12 @@ def read_bn(filename: str, normalize=True) -> BNData:
     return dict(stream_bn(filename, normalize))
 
 
-def remove_zero_weight_parents(bndata: BNData, debug=True) -> BNData:
+def remove_zero_weight_parents(bndata: BNData, debug=False) -> BNData:
     """removes non-trivial psets whose score will get rounded down to zero"""
     newbndata: BNData = dict()
     for v, psets in bndata.items():
-        newbndata[v]: Psets = {pset: score for pset, score in psets.items()
-                               if int(score) > 0 or len(pset) == 0}
+        newbndata[v] = {pset: score for pset, score in psets.items()
+                              if int(score) > 0 or len(pset) == 0}
     if debug:
         oldpsets = sum(map(len, bndata.values()))
         newpsets = sum(map(len, newbndata.values()))
@@ -327,6 +327,10 @@ def count_satisfied_constraints(bn, constraints):
     return counts
 
 
+def count_constraints(constraints: Constraints):
+    return sum(map(len, constraints.values()))
+
+
 def total_satisfied_constraints(bn, constraints):
     splits = count_satisfied_constraints(bn, constraints)
     return sum(splits.values())
@@ -354,10 +358,32 @@ def filter_satisfied_constraints(bn, constraints, debug=False) -> Constraints:
         for u, v in cons:
             if checker(u, v): satisfied[typ].append((u, v))
     if debug:
-        old_total = sum(map(len, constraints.values()))
-        new_total = sum(map(len, satisfied.values()))
+        old_total = count_constraints(constraints)
+        new_total = count_constraints(satisfied)
         print(f"filtered constraints {old_total} -> {new_total}")
     return satisfied
+
+
+def spot_failing_constraint(bn, constraints):
+    parents = {node: set(bn.dag.predecessors(node)) for node in bn.dag}
+    ancestors = {node: set(nx.ancestors(bn.dag, node)) for node in bn.dag}
+
+    base_checkers = {"arc": (lambda u, v: u in parents[v]),
+                     "anc": (lambda u, v: u in ancestors[v])}
+
+    for typ, cons in constraints.items():
+        if not cons: continue
+        subtyp, basetyp = typ[:3], typ[3:]
+        if subtyp == "neg":
+            checker = lambda u, v: not base_checkers[basetyp](u, v)
+        elif subtyp == "und":
+            checker = lambda u, v: (base_checkers[basetyp](u, v) or base_checkers[basetyp](v, u))
+        else:
+            checker = base_checkers[basetyp]
+        for u, v in cons:
+            if not checker(u, v): 
+                return typ, u, v
+    return None
 
 
 class NoSolutionException(BaseException): pass
@@ -405,7 +431,11 @@ def filled_in(graph, order) -> Tuple[nx.Graph, int]:
     max_degree = -1
     for u in order:
         trunc_graph = fgraph.subgraph(cur_nodes)
-        max_degree = max(max_degree, trunc_graph.degree(u))
+        try:
+            max_degree = max(max_degree, trunc_graph.degree(u))
+        except nx.NetworkXError as err:  #debug
+            print("### networkx error while processing node", u)
+            raise err
         neighbors = trunc_graph.neighbors(u)
         fgraph.add_edges_from(itertools.combinations(neighbors, 2))
         cur_nodes.remove(u)
@@ -686,7 +716,7 @@ if __name__ == '__main__':
     #constraints = read_constraints("../input/constraint-files/sachs-20-4.con", int)
     print("satisfied splits:", count_satisfied_constraints(bn, constraints))
     print("satisfied total:", total_satisfied_constraints(bn, constraints))
-    total_constraints = sum(map(len, constraints.values()))
+    total_constraints = count_constraints(constraints)
     print("total constraints:", total_constraints)
     print({t: len(v) for t,v in constraints.items()})
 

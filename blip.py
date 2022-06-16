@@ -10,10 +10,13 @@ import signal
 from glob import glob
 from time import sleep
 from itertools import islice
+import shutil
 
-from utils import filled_in, TreeDecomposition, pairs, stream_bn, get_bn_stats, \
-    filter_read_bn, compute_complexity_width, read_jkl, write_jkl, get_domain_sizes, \
-    CWDecomposition, Constraints, count_satisfied_constraints, total_satisfied_constraints
+from utils import count_constraints, filled_in, TreeDecomposition, pairs, stream_bn, \
+    get_bn_stats, filter_read_bn, compute_complexity_width, read_jkl, \
+    write_jkl, get_domain_sizes, CWDecomposition, Constraints, \
+    count_satisfied_constraints, total_satisfied_constraints, \
+    read_constraints, count_constraints, spot_failing_constraint
 
 import matplotlib.pyplot as plt
 from networkx.drawing.nx_agraph import pygraphviz_layout
@@ -169,7 +172,8 @@ class ConstrainedBayesianNetwork(TWBayesianNetwork):
                  elim_order=None, td=None, *args, **kwargs):
         super().__init__(input_file, tw, elim_order, td, *args, **kwargs)
         self.constraints = constraints
-        self.total_constraints = sum(map(len, constraints.values()))
+        self.total_constraints = count_constraints(constraints)
+        self.initial_satisfied_constraints = None
 
     @staticmethod
     def fromTwBayesianNetwork(twbn: TWBayesianNetwork, constraints: Constraints):
@@ -177,14 +181,43 @@ class ConstrainedBayesianNetwork(TWBayesianNetwork):
                                           twbn.elim_order, twbn.td,
                                           parents=twbn.parents)
 
+    def record_initial_satisfied_constraints(self):
+        """record current set of satisfied constraints as the initial/target"""
+        self.initial_satisfied_constraints = self.count_satisfied_constraints()
+
     def count_satisfied_constraints(self):
         return count_satisfied_constraints(self, self.constraints)
 
     def total_satisfied_constraints(self):
         return total_satisfied_constraints(self, self.constraints)
+    
+    def spot_failing_constraint(self):
+        return spot_failing_constraint(self, self.constraints)
 
-    def find_overlapping_relatives(self, node, seen: set, ancestors=True):
+    def verify(self, verify_treewidth=True, verify_constraints=True):
+        """
+        check if valid bounded tw BN and optionally if initial state recorded,
+        ensure none of the initial constraints are violated
+        """
+        super().verify(verify_treewidth=verify_treewidth)
+        if not verify_constraints: return
+        assert self.initial_satisfied_constraints, "no initial state recorded" \
+                                                   "(needed for verification)"
+        current_satisfied_constraints = self.count_satisfied_constraints()
+        initial = self.initial_satisfied_constraints
+        for typ, count in current_satisfied_constraints.items():
+            if count < initial[typ]:
+                print("initial sat:", initial)
+                print("current sat:", current_satisfied_constraints)
+            assert count >= initial[typ], f"fewer {typ} constraints satisfied" \
+                                          f" compared to initial solution"
+            if count > initial[typ]:
+                print(f"### more {typ} constraints satisfied compared to initial solution!")
+
+    def find_overlapping_relatives(self, node, seen: set, ancestors=True,
+                                   adjust=True):
         """find ancestors/descendants of node overlapping set seen"""
+        if not adjust and node in seen: return {node}
         overlap = set()
         queue = [node]
         visited = set()
@@ -195,13 +228,20 @@ class ConstrainedBayesianNetwork(TWBayesianNetwork):
             for nbr in relative(cur):
                 if nbr in visited: continue
                 if nbr in seen:
-                    if ancestors:  # if ancestor add internal node
-                        overlap.add(nbr)
-                    else:          # else add parent of internal node
+                    # adjust for asymmetry, return parent of internal hit node
+                    if not ancestors and adjust:
                         overlap.add(cur)
+                    else:  # otherwise simply return hit node
+                        overlap.add(nbr)
                 else:
                     queue.append(nbr)
         return overlap
+
+    def find_overlapping_ancestors(self, node, seen: set):
+        return self.find_overlapping_relatives(node, seen, ancestors=True, adjust=False)
+
+    def find_overlapping_descendants(self, node, seen: set):
+        return self.find_overlapping_relatives(node, seen, ancestors=False, adjust=False)
 
     def find_random_overlapping_descendant(self, node, seen: set):
         overlap = self.find_overlapping_relatives(node, seen, ancestors=False)
@@ -255,36 +295,57 @@ def parse_res(filename: str, treewidth: int, outfile: str, cwidth=-1,
     tuples = []
     extra_tuples = dict()
     score = None
+    outcopy = "temp.copy.res"
+
+    # single line parsing extracted to function for error handling
+    def parse_line(line: str):
+        if not line.strip():
+            return
+        elif line.startswith("Score:"):
+            return float(line.split()[1].strip())
+        elif line.startswith("elim-order:"):
+            elim_order = line.split()[1].strip("()").split(",")
+            elim_order = list(map(int, elim_order))
+            if debug: print("elim-order:", elim_order)
+            return elim_order
+        else:
+            vertex, rest = line.split(":")
+            vertex = int(vertex)
+            rest = rest.strip().split()
+            if len(rest) == 1:
+                local_score = float(rest[0])
+                parents = frozenset()
+            else:
+                local_score, parents = rest
+                local_score = float(local_score)
+                parents = frozenset(map(int, parents.strip("()").split(",")))
+            # bn.add(int(vertex), map(int, parents))
+            tuples.append((vertex, parents))
+            if add_extra_tuples:
+                extra_tuples[vertex] = (parents, local_score)
+            if debug: print(f"v:{vertex}, sc:{local_score}, par:{parents})")
+
     # keep retrying until file is non-empty
     while retry and os.path.getsize(outfile) == 0:
         sleep(PARSE_RETRY_INTERVAL)
-    with open(outfile) as out:
+    
+    # now file non-empty, parse it
+    shutil.copyfile(outfile, outcopy)
+    with open(outcopy) as out:
         for line in out:
-            if not line.strip():
-                continue
-            elif line.startswith("Score:"):
-                score = float(line.split()[1].strip())
-                break
-            elif line.startswith("elim-order:"):
-                elim_order = line.split()[1].strip("()").split(",")
-                elim_order = list(map(int, elim_order))
-                if debug: print("elim-order:", elim_order)
+            try:
+                result = parse_line(line)
+            except ValueError as err:
+                print("### parsing error in line:")
+                print(line)
+                raise err
             else:
-                vertex, rest = line.split(":")
-                vertex = int(vertex)
-                rest = rest.strip().split()
-                if len(rest) == 1:
-                    local_score = float(rest[0])
-                    parents = frozenset()
-                else:
-                    local_score, parents = rest
-                    local_score = float(local_score)
-                    parents = frozenset(map(int, parents.strip("()").split(",")))
-                # bn.add(int(vertex), map(int, parents))
-                tuples.append((vertex, parents))
-                if add_extra_tuples:
-                    extra_tuples[vertex] = (parents, local_score)
-                if debug: print(f"v:{vertex}, sc:{local_score}, par:{parents})")
+                if isinstance(result, float):
+                    score = result
+                elif isinstance(result, list):
+                    elim_order = result
+    if not debug: os.remove(outcopy)
+    
     if add_extra_tuples:
         inject_tuples(filename, extra_tuples, augfile, True)
         if debug: print("temporary merged file saved as", augfile)
@@ -296,7 +357,10 @@ def parse_res(filename: str, treewidth: int, outfile: str, cwidth=-1,
         bn = CWBayesianNetwork(cwidth=cwidth, input_file=input_file, datfile=datfile)
     else:
         bn = TWBayesianNetwork(tw=treewidth, input_file=input_file)
-    if elim_order is not None: bn.elim_order = elim_order
+    if elim_order is not None:
+        bn.elim_order = elim_order
+    else:
+        if debug: print("no elim order found, setting empty")
     for node, parents in tuples: bn.add(node, parents)
     bn.done()
     if score is not None:
@@ -369,7 +433,7 @@ def run_blip(filename, treewidth, outfile="temp.res", timeout=10, seed=0,
         return None
 
 
-def activate_checkpoints(bnprovider, save_as):
+def activate_checkpoints(bnprovider, save_as, debug=False):
     def alarm_handler(signalnum, frame):
         print("alarm triggered")
         try:
@@ -378,8 +442,10 @@ def activate_checkpoints(bnprovider, save_as):
             print("bn res file invalid (probably got overwritten)")
             signal.alarm(CHECKPOINT_RETRY_INTERVAL)  # snooze alarm
         else:
-            patn = save_as.replace(".res", "*.res")
-            prefix, ext = os.path.splitext(save_as)
+            patn = save_as.replace(".res", "_*.res")
+            prefix, ext = os.path.splitext(patn)
+            prefix = prefix.replace("*", "")
+            if debug: print(f"activate_checkpoints, prefix: {prefix}, ext: {ext}")
             prev_checkpoint = 0
             for check_file in glob(patn):
                 try:
@@ -388,8 +454,9 @@ def activate_checkpoints(bnprovider, save_as):
                     continue
                 else:
                     prev_checkpoint = max(prev_checkpoint, saved_at)
+                    if debug: print("activate_checkpoints, prev: {prev_checkpoint}")
             new_checkpoint = prev_checkpoint + CHECKPOINT_MINUTES
-            fname = save_as.replace(".res", f"{new_checkpoint}.res")
+            fname = save_as.replace(".res", f"_{new_checkpoint}.res")
             print("saving checkpoint to", fname)
             write_res(bn, fname, write_elim_order=True)
             signal.alarm(CHECKPOINT_INTERVAL)  # reset alarm
@@ -399,8 +466,8 @@ def activate_checkpoints(bnprovider, save_as):
 
 
 def monitor_blip(filename, treewidth, logger: Callable, outfile="temp.res",
-                 timeout=10, seed=0, solver="kg", datfile=None,
-                 cwidth=0, onlyfilter=False, save_as="", debug=False):
+                 timeout=10, seed=0, solver="kg", datfile=None, cwidth=0,
+                 onlyfilter=False, confile=None, save_as="", debug=False):
     """
     Run BLIP in monitoring mode, where each new score update is logged
 
@@ -414,10 +481,13 @@ def monitor_blip(filename, treewidth, logger: Callable, outfile="temp.res",
     :param datfile: path to data file (with header rows, for domain sizes)
     :param cwidth: cwidth bound (if positive, activates CWIDTH_MODE)
     :param onlyfilter: only use pset filtering algo (ignored if not in CWIDTH_MODE)
+    :param confile: path to constraints file (custom format) (overrides solver to 'kg.adv')
     :param save_as: filepath prefix to use for saving checkpoint solutions
     :param debug: enable debug mode
     """
     CWIDTH_MODE = cwidth > 0
+    CONSTRAINED = confile is not None
+    assert not (CWIDTH_MODE and CONSTRAINED), "constrained mode not compatible with cwidth"
     if CWIDTH_MODE:
         assert solver in ("old", "greedy", "max"), \
             f"invalid solver({solver}) for monitor_blip in CWIDTH_MODE"
@@ -427,29 +497,41 @@ def monitor_blip(filename, treewidth, logger: Callable, outfile="temp.res",
                 "-r", outfile, "-t", str(timeout), "-seed", str(seed)]
         if onlyfilter: args.append("-filter")
     else:
-        basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"),
-                   f"solver.{solver}", "-v", "1"]
+        if CONSTRAINED:
+            basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip-con.jar"),
+                    "solver.kg.adv", "-v", "1"]
+            constraints = read_constraints(confile, typecast_node=int)
+            basecmd += ["-con", confile]
+        else:
+            basecmd = ["java", "-jar", os.path.join(SOLVER_DIR, "blip.jar"),
+                    f"solver.{solver}", "-v", "1"]
         args = ["-j", filename, "-w", str(treewidth), "-r", outfile,
                 "-t", str(timeout), "-seed", str(seed)]
     cmd = basecmd + args
     if debug: print("monitoring blip, cmd:", " ".join(cmd))
+        
     if save_as:
         if CWIDTH_MODE:
             bnprovider = lambda: parse_res(filename, 0, outfile, cwidth=cwidth,
                                            datfile=datfile)
+        elif CONSTRAINED:
+            bnprovider = lambda: ConstrainedBayesianNetwork.fromTwBayesianNetwork(
+                                    parse_res(filename, treewidth, outfile),
+                                    constraints )
         else:
             bnprovider = lambda: parse_res(filename, treewidth, outfile)
         activate_checkpoints(bnprovider, save_as)
+
     domain_sizes = None if datfile is None else get_domain_sizes(datfile)
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=1,
                           universal_newlines=True) as proc:
         for line in proc.stdout:
-            if debug: print("got line:", line, end='')
             match = SCORE_PATN.match(line)
+            if debug: print("got", "*" if match else " ", "line:", line, end='')
             if match:
                 score = float(match['score'])
                 logdata = {"score": score}
-                if domain_sizes is not None:
+                if CWIDTH_MODE or CONSTRAINED:
                     try:
                         bn = bnprovider()
                     except IndexError:  # todo: not reached anymore, retries, rethink
@@ -457,10 +539,25 @@ def monitor_blip(filename, treewidth, logger: Callable, outfile="temp.res",
                         cw = acw = -1
                     else:
                         tw = bn.td.compute_width()
-                        cw = compute_complexity_width(bn.td, domain_sizes)
                         logdata["tw"] = tw
-                        logdata["cw"] = cw
+                        if CWIDTH_MODE:
+                            cw = compute_complexity_width(bn.td, domain_sizes)
+                            logdata["cw"] = cw
+                        if CONSTRAINED:
+                            # logdata["initial_cons"] = bn.initial_satisfied_constraints
+                            satisfied = bn.count_satisfied_constraints()
+                            for key, value in satisfied.items():
+                                logdata[f"con_{key}"] = value
+                            logdata["cons_total"] = count_constraints(constraints)
+                            logdata["cons_total_sat"] = sum(satisfied.values())
                 logger(logdata)
+    
+    if save_as:
+        bn = bnprovider()  # final network
+        fname = save_as.replace(".res", "_final.res")
+        print("saving checkpoint to", fname)
+        write_res(bn, fname, write_elim_order=True)
+
     print(f"done returncode: {proc.returncode}")
 
 

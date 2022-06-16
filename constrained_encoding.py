@@ -7,7 +7,7 @@ import sys
 import subprocess
 import shutil  # for copypath
 from time import perf_counter as now
-from typing import Dict, Tuple, Iterable
+from typing import Dict, Tuple, Iterable, List
 from contextlib import contextmanager
 
 # external
@@ -28,42 +28,52 @@ BIDIRECTIONAL = True
 # todo: figure out if imply_arc speeds up solving
 IMPLY_ARC = True
 
-IncomingArcs = Tuple[IntPairs, IntPairs]  # posarc, negarc
 # list of pairs (Ai, Bi) such that any(ai ~~~> bi) where ai in Ai, bi in Bi
 PathPairs = Iterable[Tuple[Iterable[int], Iterable[int]]]
 
 
 class ConstrainedBnEncoding(TwbnEncoding):
-    def __init__(self, constraints: Constraints, incoming_arcs: IncomingArcs,
-                 path_pairs: PathPairs, external_pairs: PathPairs, data: BNData,
-                 stream, forced_arcs=None, forced_cliques=None, pset_acyc=None,
-                 debug=False):
+    def __init__(self, constraints: Constraints, block_arcs: IntPairs,
+                 any_path_pairs: PathPairs, none_path_pairs: PathPairs,
+                 extra_parents: set, data: BNData, stream, forced_arcs=None,
+                 forced_cliques=None, pset_acyc=None, debug=False):
         """
         Construct an encoding for the Constrained BNSL problem.
         Use ``ConbnDecoder`` along with an object of this class to decode the
         model output by the MaxSAT solver.
 
-        :param constraints:   expert constraints (only those whose endpoints
-                              are in the local instance)
-        :param incoming_arcs  pair of tuples ((u*, v), (a*, b) requiring
-                              u* ---> v and a* -/-> b where u*, a* are not
-                              a part of the local instance and v, b are
-        :param path_pairs     tuples (A, B) of sets such that a disjunction of
-                              paths is required over the cartesian product AxB
-        :param external_pairs forbidden path pairs where left end lies outside.
-                              (A, B) such that no path from a in A to b in B
-        :param data:          pset cache data
-        :param stream:        stream to write encoding to
+        :param constraints:    expert constraints (only those whose endpoints
+                               are in the local instance)
+        :param block_arcs      list of pairs (a*, b) requiring a* -/-> b
+                               where a* is outside and b is in the local instance
+        :param any_path_pairs  tuples (A, B) of sets such that a disjunction of
+                               paths is required over the cartesian product AxB
+        :param none_path_pairs forbidden path pairs where left end lies outside.
+                               (A, B) such that no path from a in A to b in B
+        :param extra_parents   extra parents are nodes which can act as parents
+                               for internal nodes but have their own parents fixed
+                               short-circuited parent data for extra parents is
+                               included in forced_arcs.
+        :param data:           pset cache data
+        :param stream:         stream to write encoding to
         :param forced_arcs:
         :param forced_cliques:
         :param pset_acyc:
         :param debug:         debug mode on/off
         """
-        super().__init__(data, stream, forced_arcs, forced_cliques, pset_acyc, debug)
+        # clone data and add dummy psets for the extra parents
+        # self.extra_data = extra_data
+        self.extra_parents = extra_parents
+        assert self.extra_parents.isdisjoint(data.keys())
+        new_data = {parent: {frozenset(): 0} for parent in extra_parents}
+        new_data.update(data)
+
+        super().__init__(new_data, stream, forced_arcs, forced_cliques,
+                         pset_acyc, debug)
         self.constraints = constraints
-        self.incoming_posarcs, self.incoming_negarcs = incoming_arcs
-        self.path_pairs = path_pairs
-        self.external_pairs = external_pairs
+        self.block_arcs = block_arcs
+        self.any_path_pairs = any_path_pairs
+        self.none_path_pairs = none_path_pairs
 
         # needed for encode_dagarcs
         self.bidirectional = BIDIRECTIONAL
@@ -233,57 +243,58 @@ class ConstrainedBnEncoding(TwbnEncoding):
             with self.clause_block("posarc constraints", "con"):
                 for _u, _v in self.constraints["posarc"]:
                     u, v = self.lookup(_u, _v)
-                    self._add_comment(f"[con] constraint {_u}  ---> {_v}")
+                    self._add_comment(f"[con] constraint {_u} ---> {_v}")
                     self._add_clause(self._dagarc(u, v))
 
             with self.clause_block("negarc constraints", "con"):
                 for _u, _v in self.constraints["negarc"]:
                     u, v = self.lookup(_u, _v)
-                    self._add_comment(f"[con] constraint {_u}  -/-> {_v}")
+                    self._add_comment(f"[con] constraint {_u} -/-> {_v}")
                     self._add_clause(-self._dagarc(u, v))
 
             with self.clause_block("undarc constraints", "con"):
                 for _u, _v in self.constraints["undarc"]:
                     u, v = self.lookup(_u, _v)
-                    self._add_comment(f"[con] constraint {_u}  ---  {_v}")
+                    self._add_comment(f"[con] constraint {_u} --- {_v}")
                     self._add_clause(self._dagarc(u, v), self._dagarc(v, u))
 
             with self.clause_block("posanc constraints", "con"):
                 for _u, _v in self.constraints["posanc"]:
                     u, v = self.lookup(_u, _v)
-                    self._add_comment(f"[con] constraint {_u}  ~~~> {_v}")
+                    self._add_comment(f"[con] constraint {_u} ~~~> {_v}")
                     self._add_clause(self._pathp(u, v))
 
             with self.clause_block("neganc constraints", "con"):
                 for _u, _v in self.constraints["neganc"]:
                     u, v = self.lookup(_u, _v)
-                    self._add_comment(f"[con] constraint {_u}  ~/~> {_v}")
+                    self._add_comment(f"[con] constraint {_u} ~/~> {_v}")
                     self._add_clause(-self._transarc(u, v))
 
             with self.clause_block("undanc constraints", "con"):
                 for _u, _v in self.constraints["undanc"]:
                     # raise NotImplementedError("undirected ancestry constraints not supported")
                     u, v = self.lookup(_u, _v)
-                    self._add_comment(f"[con] constraint {_u}  ~~~  {_v}")
+                    self._add_comment(f"[con] constraint {_u} ~~~ {_v}")
                     self._add_clause(self._pathp(u, v), self._pathp(v, u))
 
-    def encode_incoming_arcs(self):
+    def encode_block_arcs(self):
         with self.clause_block("incoming arcs", "con+slim"):
             blocked_vars = set()
-            with self.clause_block("posarcs", "con+slim"):
-                for _u, _v in self.incoming_posarcs:
-                    u, v = self.lookup(_u, _v)
-                    for pset, var in self.par[v].items():
-                        if u not in pset:  # discard psets not containing u
-                            self._add_comment(f"block pset {set(pset)} ({var}) "
-                                              f"for {_v} as it doesnt contain {_u}")
-                            blocked_vars.add(var)
+            # no longer needed, switched to extra_parents
+            # with self.clause_block("posarcs", "con+slim"):
+            #     for _u, _v in self.incoming_posarcs:
+            #         u, v = self.lookup(_u, _v)
+            #         for pset, var in self.par[v].items():
+            #             if _u not in pset:  # discard psets not containing u
+            #                 self._add_comment(f"block pset {set(pset)} ({var}) "
+            #                                   f"for {_v} as it doesnt contain {_u}")
+            #                 blocked_vars.add(var)
 
             with self.clause_block("negarcs", "con+slim"):
-                for _u, _v in self.incoming_negarcs:
+                for _u, _v in self.block_arcs:
                     u, v = self.lookup(_u, _v)
                     for pset, var in self.par[v].items():
-                        if u in pset:  # discard psets containing u
+                        if _u in pset:  # discard psets containing u
                             self._add_comment(f"block pset {set(pset)} ({var}) "
                                               f"for {_v} as it contains {_u}")
                             blocked_vars.add(var)
@@ -301,9 +312,16 @@ class ConstrainedBnEncoding(TwbnEncoding):
             #
             # raise NotImplementedError("undirected ancestry constraints not supported")
 
-    def encode_path_pairs(self):
-        with self.clause_block("path pairs", "con+slim"):
-            for U, V in self.path_pairs:
+    def encode_forced_arcs_as_transarcs(self):
+        with self.clause_block("forced arcs as transarcs", "con+slim"):
+            for _u, _v in self.forced_arcs:
+                u, v = self.lookup(_u, _v)
+                self._add_comment(f"forcing arc {_u} -> {_v} via transarc")
+                self._add_clause(self._transarc(u, v))
+
+    def encode_disjunction_path_pairs(self):
+        with self.clause_block("disjunction path pairs", "con+slim"):
+            for U, V in self.any_path_pairs:
                 self._add_comment(f"some path from {U} to {V}")
                 path_vars = []
                 for _u, _v in itertools.product(U, V):
@@ -311,23 +329,29 @@ class ConstrainedBnEncoding(TwbnEncoding):
                     path_vars.append(self._pathp(u, v))
                 self._add_clause(*path_vars)
 
-    def encode_forbidden_external_pairs(self):
+    def encode_forbidden_path_pairs(self):
         with self.clause_block("forbidden external paths", "con+slim"):
-            for U, V in self.external_pairs:
+            for U, V in self.none_path_pairs:
                 with self.clause_block(f"encoding {U} ~/~> {V}", "con+slim"):
-                    for _u in self.data:
-                        u = self.lookup(_u)
-                        for p, _ in self.data[_u].items():
-                            if p.intersection(U):  # if parent set intersects
-                                self._add_comment(f"par({_u}, {set(p)}) => {_u} ~/~> {V}")
-                                for v in V:
-                                    self._add_clause(-self.par[u][p], -self._transarc(u, v))
+                    for _u, _v in itertools.product(U, V):
+                        u, v = self.lookup(_u, _v)
+                        self._add_comment(f"{_u} ~/~> {_v}")
+                        # self._add_clause(-self._pathp(u, v))
+                        self._add_clause(-self._transarc(u, v))
+                    # for _u in self.data:
+                    #     u = self.lookup(_u)
+                    #     for p, _ in self.data[_u].items():
+                    #         if p.intersection(U):  # if parent set intersects
+                    #             self._add_comment(f"par({_u}, {set(p)}) => {_u} ~/~> {V}")
+                    #             for v in V:
+                    #                 self._add_clause(-self.par[u][p], -self._transarc(u, v))
 
     def encode_constraints(self):
         self.encode_internal_constraints()
-        self.encode_incoming_arcs()
-        self.encode_path_pairs()
-        self.encode_external_pairs()
+        self.encode_block_arcs()
+        self.encode_forced_arcs_as_transarcs()
+        self.encode_disjunction_path_pairs()
+        self.encode_forbidden_path_pairs()
 
     def encode(self):
         super().encode()  # encode bn, tw, arcs, transitivity, fill-in (in order)
@@ -372,6 +396,26 @@ class ConbnDecoder(TwbnDecoder):
         for _u, _v in ref_edges.difference(our_edges):
             assert self.encoder.lookup(_u) is None, f"dagarc missed edge: {_u}, {_v}"
 
+    def get_parents(self):
+        """ override TwbnDecoder.get_parents to filter out extra_parents """
+        extra_parents = self.encoder.extra_parents
+        parents = super().get_parents()
+        for node in extra_parents:
+            del parents[node]
+        return parents
+
+    def get_elim_order(self):
+        """ override TwbnDecoder.get_elim_order to filter out extra_parents """
+        extra_parents = self.encoder.extra_parents
+        order = super().get_elim_order()
+        return [element for element in order if element not in extra_parents]
+
+    # def get_triangulated(self):
+    #     extra_parents = self.encoder.extra_parents
+    #     tri = super().get_triangulated()
+    #     tri.remove_nodes_from(extra_parents)
+    #     return tri
+
     def get_bn(self):
         bn = super().get_bn()
         if __debug__: self.check_dagarc(bn.dag)
@@ -379,18 +423,18 @@ class ConbnDecoder(TwbnDecoder):
 
 
 def solve_conbn(data: BNData, treewidth: int, input_file: str,
-                internal_constraints: Constraints, incoming_arcs: IncomingArcs,
-                path_pairs: PathPairs, external_pairs: PathPairs,
-                forced_arcs=None, forced_cliques=None, pset_acyc=None,
-                timeout: int = TIMEOUT, debug=False):
+                internal_constraints: Constraints, block_arcs: IntPairs,
+                any_path_pairs: PathPairs, none_path_pairs: PathPairs,
+                extra_parents: set = None, forced_arcs=None, forced_cliques=None,
+                pset_acyc=None, timeout: int = TIMEOUT, debug=False):
     cnfpath = "temp.cnf"
     # safer to eliminate zero weight non-trivial parents at this stage
     data = remove_zero_weight_parents(data, debug=debug)
     with open(cnfpath, 'w') as cnffile:
-        enc = ConstrainedBnEncoding(internal_constraints, incoming_arcs,
-                                    path_pairs, external_pairs, data, cnffile,
-                                    forced_arcs, forced_cliques, pset_acyc,
-                                    debug=True)
+        enc = ConstrainedBnEncoding(internal_constraints, block_arcs,
+                                    any_path_pairs, none_path_pairs,
+                                    extra_parents, data, cnffile, forced_arcs,
+                                    forced_cliques, pset_acyc, debug=debug)
         enc.encode_sat(treewidth)
     # if debug: print("encoding done")
     if debug: print(f"maxsat stats: {len(enc.vars)} vars, {enc.num_clauses} clauses")
@@ -445,15 +489,17 @@ def solve_constrained(instance, treewidth, percent, seed, timeout):
     # todo: verify unsat instance for sachs 10-3
     # constraints["posanc"].append((5, 0))
 
-    incoming_arcs: IncomingArcs = ([], [])
-    path_pairs: PathPairs = [({5, 6, 4}, {3, 0})]
+    # incoming_arcs: IncomingArcs = ([], [])
+    # path_pairs: PathPairs = [({5, 6, 4}, {3, 0})]
+    any_path_pairs: PathPairs = []
+    none_path_pairs: PathPairs = []
 
     # constraints["posanc"] = [(3,4)]
     # constraints["neganc"].clear()
 
     print(f"working on {jklfile} + {confile}, timeout: {timeout}")
-    bn = solve_conbn(bndata, treewidth, jklpath, constraints, incoming_arcs,
-                     path_pairs, timeout=timeout, debug=True)
+    bn = solve_conbn(bndata, treewidth, jklpath, constraints, [],
+                     any_path_pairs, none_path_pairs, timeout=timeout, debug=True)
     print("bn score:", bn.score)
     # print("bn psets:")
     # print_bn(bn)
@@ -462,10 +508,11 @@ def solve_constrained(instance, treewidth, percent, seed, timeout):
 
 
 if __name__ == '__main__':
-    # instance, treewidth = "cancer", 3
+    instance, treewidth = "cancer", 3
+    percent, seed = 5, 1
     # for (percent, seed) in [(5,5), (10,3), (10,4), (10,5), (15,3), (15,4), (15,5), (20,2), (20,3), (20,5)]:
-    instance, treewidth = "sachs", 4
-    percent, seed = 10, 3
+    # instance, treewidth = "sachs", 4
+    # percent, seed = 10, 3
     bn = solve_constrained(instance, treewidth, percent, seed, timeout=10)
     from pprint import pprint
     pprint(list(bn.dag.edges))

@@ -1,0 +1,10 @@
+negarc 0 3
+negarc 0 4
+posarc 1 2
+posarc 4 5
+undarc 0 2
+undarc 2 3
+neganc 5 1
+neganc 5 0
+posanc 4 5
+posanc 2 3

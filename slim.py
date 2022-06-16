@@ -22,12 +22,12 @@ import re
 from blip import run_blip, BayesianNetwork, TWBayesianNetwork, monitor_blip, \
     parse_res, start_blip_proc, check_blip_proc, stop_blip_proc, write_res, \
     activate_checkpoints, ConstrainedBayesianNetwork
-from utils import TreeDecomposition, pick, pairs, filter_read_bn, BNData, NoSolutionException, \
+from utils import TreeDecomposition, count_constraints, pick, pairs, filter_read_bn, BNData, NoSolutionException, \
     get_domain_sizes, log_bag_metrics, compute_complexity_width, weight_from_domain_size, \
     compute_complexity, compute_complexities, shuffled, Constraints, IntPairs, read_constraints, \
     filter_satisfied_constraints
 from berg_encoding import solve_bn, PSET_ACYC
-from constrained_encoding import IncomingArcs, PathPairs, solve_conbn
+from constrained_encoding import IntPairs, PathPairs, solve_conbn
 from eval_model import eval_all
 
 # optional
@@ -163,8 +163,12 @@ def find_subtree(td: TreeDecomposition, budget: int, history: Counter = None,
 
 def handle_acyclicity(bn: BayesianNetwork, seen: set, leaf_nodes: set, debug=False):
     dag = bn.dag
+    # old way of restricting view to just crossing edges
+    # subdag = nx.subgraph_view(dag, lambda x: True,
+    #                           lambda x, y: not ((x in seen) and (y in seen)))
+    # now trying to restrict view to non incoming edges (asymmetry)
     subdag = nx.subgraph_view(dag, lambda x: True,
-                              lambda x, y: not ((x in seen) and (y in seen)))
+                              lambda x, y: y not in seen)
     forced_arcs = []
     for src, dest in pairs(leaf_nodes):
         if nx.has_path(subdag, src, dest):
@@ -201,7 +205,14 @@ def prepare_subtree(bn: TWBayesianNetwork, bag_ids: set, seen: set, debug=False)
 
     data, pset_acyc = get_data_for_subtree(bn, boundary_nodes, seen, forced_arcs)
 
-    return forced_arcs, forced_cliques, data, pset_acyc
+    extra_parents = identify_extra_parents(data, seen)
+    # extra_arcs = compute_extra_arcs(bn, data, seen, boundary_nodes)
+    extra_arcs = handle_acyclicity(bn, seen, extra_parents | boundary_nodes)
+    for u, v in extra_arcs:
+        if u in seen and v in seen: continue  # arc already added
+        forced_arcs.append((u, v))
+
+    return forced_arcs, forced_cliques, data, pset_acyc, extra_parents
 
 
 def get_data_for_subtree(bn: TWBayesianNetwork, boundary_nodes: set, seen: set,
@@ -244,7 +255,7 @@ def get_data_for_subtree(bn: TWBayesianNetwork, boundary_nodes: set, seen: set,
                     for parent in rem_parents:
                         if parent in downstream_graph:
                             req_acyc.update(downstream_graph.predecessors(parent))
-                    pset_acyc[(node, pset)] = req_acyc
+                    if req_acyc: pset_acyc[(node, pset)] = req_acyc
                 data[node][pset] = score
         else:  # internal node
             for pset, score in psets.items():
@@ -254,13 +265,66 @@ def get_data_for_subtree(bn: TWBayesianNetwork, boundary_nodes: set, seen: set,
     return data, pset_acyc
 
 
-def compute_path_pairs(bn: ConstrainedBayesianNetwork, constraints: Constraints,
-                       seen: set) -> Tuple[IntPairs, PathPairs]:
+def compute_path_pairs(bn: ConstrainedBayesianNetwork,
+                       typ_constraints: List[Tuple], seen: set,
+                       extra_parents: set, assert_disjoint=False) -> PathPairs:
     """
     Compute pairs of sets such that for each pair (A, B)
     there must be a path from some a in A to some b in B
+    or alternatively, there is no path from a in A to b in B.
+
+    :param bn:              global bayesian network
+    :param typ_constraints: just one type of constraint (list of tuples)
+    :param seen:            set of vertices part of local instance
+    :param extra_parents:   set of extra nodes (expanded budget)
+    :param assert_disjoint: ensures all pairs are disjoint
+    :return: list of 2-tuples of sets of vertices
     """
-    incoming_arcs = []
+    path_pairs = []
+
+    # path pairs from incoming constraints
+    for u, v in typ_constraints:
+        useen = u in seen
+        vseen = v in seen
+        if useen and vseen: continue  # handled by internal constraint
+        if v in extra_parents: continue  # ignore if right end is extra parent
+
+        if vseen:
+            right_ends = {v}
+        else:
+            right_ends = bn.find_overlapping_ancestors(v, seen)
+            if not right_ends: continue
+
+        # left_ends = set()
+        uextra = u in extra_parents
+        if useen or uextra:
+            left_ends = {u}
+        else:
+            assert not useen, "expected left end to be outside"
+            # if not useen or uextra:
+            left_ends = bn.find_overlapping_descendants(u, seen | extra_parents)
+            if not left_ends: continue
+
+        if assert_disjoint:
+            assert left_ends.isdisjoint(right_ends),\
+                   "non-disjoint forbidden path pair found"
+        else:
+            # most likely for positive ancestry, so skip pair if already overlap
+            if not left_ends.isdisjoint(right_ends): continue
+
+        # at this point, both must be non-empty
+        assert left_ends and right_ends, "previous continues failed"
+        path_pairs.append((left_ends, right_ends))
+
+    return path_pairs
+
+
+def compute_path_pairs_old(bn: ConstrainedBayesianNetwork,
+                           constraints: Constraints, seen: set) -> PathPairs:
+    """
+    [deprecated] Compute pairs of sets such that for each pair (A, B)
+    there must be a path from some a in A to some b in B
+    """
     path_pairs = []
 
     # path pairs from incoming constraints
@@ -272,29 +336,40 @@ def compute_path_pairs(bn: ConstrainedBayesianNetwork, constraints: Constraints,
             left_ends = {u}
             right_ends = bn.find_overlapping_relatives(v, seen, ancestors=True)
             if not right_ends: continue
+            if u in right_ends: continue  # already ancestor
         else:  # hard case, path originates outside
             if vseen:
                 right_ends = {v}
             else:
                 right_ends = bn.find_overlapping_relatives(v, seen, ancestors=True)
                 if not right_ends: continue
-            res = bn.find_random_overlapping_descendant(u, seen)
-            if res is None: continue  # no overlapping descendant found
-            parent, child = res
-            incoming_arcs.append((parent, child))
-            left_ends = {child}
-        assert left_ends.isdisjoint(right_ends), "non-disjoint path pair found, do something about it"
+
+            # old code which randomly selected a descendant
+            # res = bn.find_random_overlapping_descendant(u, seen)
+            # if res is None: continue  # no overlapping descendant found
+            # parent, child = res
+            # incoming_arcs.append((parent, child))
+            # left_ends = {child}
+
+            left_ends = bn.find_overlapping_relatives(u, seen, ancestors=False)
+            if not left_ends: continue
+        if not left_ends.isdisjoint(right_ends):
+            print("### non-disjoint:", left_ends, right_ends, "[considering satisfied]")
+            print(f"for {u} ~~~> {v}, seen:", seen)
+            continue
+        # assert left_ends.isdisjoint(right_ends), "non-disjoint path pair found, do something about it"
         # at this point, both must be non-empty
         assert left_ends and right_ends, "previous continues failed"
         path_pairs.append( (left_ends, right_ends) )
 
-    return incoming_arcs, path_pairs
+    # return incoming_arcs, path_pairs
+    return path_pairs
 
 
-def compute_path_pairs_old(bn: ConstrainedBayesianNetwork, constraints: Constraints,
+def compute_path_pairs_older(bn: ConstrainedBayesianNetwork, constraints: Constraints,
                            seen: set) -> PathPairs:
     """
-    Compute pairs of sets such that for each pair (A, B)
+    [deprecated] Compute pairs of sets such that for each pair (A, B)
     there must be a path from some a in A to some b in B
     """
     path_pairs = []
@@ -330,6 +405,7 @@ def internalize_forbidden_paths(bn: ConstrainedBayesianNetwork,
                                 constraints: Constraints,
                                 seen: set) -> Tuple[IntPairs, PathPairs]:
     """
+    [deprecated, use compute_path_pairs]
     Convert non-internal neganc constraints into internal neganc constraints
     """
     forbidden_internal_paths = []
@@ -396,8 +472,8 @@ def internalize_forbidden_paths_old(bn: ConstrainedBayesianNetwork,
 
 
 def specialize_constraints(bn: ConstrainedBayesianNetwork, constraints: Constraints,
-                           seen: set) -> Tuple[Constraints, IncomingArcs,
-                                               PathPairs, PathPairs]:
+                           seen: set, extra_parents: set, debug=False) -> Tuple[
+                               Constraints, IntPairs, PathPairs, PathPairs]:
     # filter constraints to obtain internal_constraints (both endpoints in seen)
     internal_constraints = {typ: [] for typ in constraints}
     for typ, cons in constraints.items():
@@ -406,31 +482,73 @@ def specialize_constraints(bn: ConstrainedBayesianNetwork, constraints: Constrai
                 internal_constraints[typ].append((u, v))
 
     # compute incoming arcs (arc constraints with right endpoint in seen)
-    posarcs = []
     for u, v in constraints["posarc"]:
         if u not in seen and v in seen:
-            posarcs.append((u, v))
-    # only set undarc as posarc in the agreeing orientation
+            assert u in extra_parents, f"{u}->{v} left end not extra parent"
+            internal_constraints["posarc"].append((u, v))
+
+    # set undarc as posarc in the agreeing orientation
     for u, v in constraints["undarc"]:
         if u not in seen and v in seen:
             if u in bn.parents[v]:  # check current orientation
-                posarcs.append((u, v))
+                assert u in extra_parents, f"{u}-{v} (collapsed) left end not extra parent"
+                internal_constraints["posarc"].append((u, v))
+        elif u in seen and v not in seen:
+            if v in bn.parents[u]:  # opposite orientation
+                assert v in extra_parents, f"{v}-{u} (collapsed) left end not extra parent"
+                internal_constraints["posarc"].append((v, u))
 
-    negarcs = []
+    block_arcs = []
     for u, v in constraints["negarc"]:
         if u not in seen and v in seen:
-            negarcs.append((u, v))
+            if u in extra_parents:
+                internal_constraints["negarc"].append((u, v))
+            else:
+                block_arcs.append((u, v))
 
     # add internal constraints due to non-internal forbidden path constraints
-    extra_paths, external_pairs = internalize_forbidden_paths(bn, constraints, seen)
-    internal_constraints["neganc"].extend(extra_paths)
+    none_path_pairs = compute_path_pairs(bn, constraints["neganc"], seen,
+                                         extra_parents, assert_disjoint=True)
 
-    extra_arcs, path_pairs = compute_path_pairs(bn, constraints, seen)
-    posarcs.extend(extra_arcs)
+    # incoming_arcs, any_path_pairs = compute_path_pairs(bn, constraints, seen)
+    any_path_pairs = compute_path_pairs(bn, constraints["posanc"], seen,
+                                        extra_parents, assert_disjoint=False)
 
-    incoming_arcs: IncomingArcs = (posarcs, negarcs)
+    if debug:
+        print("from internalize none_pp:", none_path_pairs)
+        print("from compute pp any_pp:", any_path_pairs)
 
-    return internal_constraints, incoming_arcs, path_pairs, external_pairs
+    return internal_constraints, block_arcs, any_path_pairs, none_path_pairs
+
+
+def identify_extra_parents(data: BNData, seen: set) -> set:
+    extra_parents = set()
+    for node, psets in data.items():
+        for pset in psets:
+            extra_parents.update(pset - seen)
+    return extra_parents
+
+
+def compute_extra_arcs(bn: TWBayesianNetwork, data: BNData,
+                       seen: set, leafs: set) -> Tuple[set, list]:
+    """
+    Identify the nodes that can potentially act as parents for nodes
+    from the seen set but have their own parents frozen/fixed
+
+    :param bn:    current bn, used to find external paths
+    :param data:  subset of data from local instance
+    :param seen:  nodes being considered for local instance (same a data.keys())
+    :param leafs: internal nodes which interact with external nodes (boundary)
+    :return: dict with extra parents as keys and their psets as values
+    """
+    extra_parents = identify_extra_parents(data, seen)
+
+    extra_arcs = handle_acyclicity(bn, seen, extra_parents | leafs)
+    # extra_data = {node: set() for node in extra_parents}
+    # for u, v in extra_arcs:
+    #     extra_data[v].add(u)
+
+    return extra_parents, extra_arcs
 
 
 def compute_max_score(data: BNData, bn: BayesianNetwork) -> float:
@@ -441,7 +559,7 @@ def compute_max_score(data: BNData, bn: BayesianNetwork) -> float:
 
 
 METRICS = ("start_score", "num_passes", "num_improvements", "skipped",
-           "nosolution", "restarts", "start_width")
+           "nosolution", "restarts", "start_width", "constraints_satisfied")
 
 
 class Solution(object):
@@ -452,8 +570,9 @@ class Solution(object):
         # mute logger for code completion hack
         self.logger = None
         # for code completion
-        self.start_score = self.num_passes = self.num_improvements = \
+        self.start_score = self.num_passes = self.num_improvements = 0
         self.skipped = self.nosolution = self.restarts = self.start_width = 0
+        self.constraints_satisfied = 0
         # set proper value for logger now
         self.logger = logger
 
@@ -504,17 +623,23 @@ def slimpass(bn: Union[TWBayesianNetwork, ConstrainedBayesianNetwork],
     history.update(selected)
     prep_tuple = prepare_subtree(bn, selected, seen, debug)
     if prep_tuple is None: return
-    forced_arcs, forced_cliques, data, pset_acyc = prep_tuple
+    forced_arcs, forced_cliques, data, pset_acyc, extra_parents = prep_tuple
+    # extra parents are nodes which can act as parents for seen nodes
+    # but don't allow their own parents to change
+    # extra_data = compute_extra_arcs(bn, data, seen)
+    # extra_parents = set(extra_data.keys())
+    if extra_parents: print("extra parents found")
+    # extra_parents = set()
 
     # process constraints if applicable
-    internal_constraints, incoming_arcs = None, None
-    path_pairs, external_pairs = None, None
+    internal_constraints, block_arcs = None, None
+    any_path_pairs, none_path_pairs = None, None
     if CONSTRAINED:
         assert constraints, "constraints not supplied despite CONSTRAINED mode"
         assert isinstance(bn, ConstrainedBayesianNetwork), \
             "supplied bn not of type ConstrainedBayesianNetwork"
-        specialized = specialize_constraints(bn, constraints, seen)
-        internal_constraints, incoming_arcs, path_pairs, external_pairs = specialized
+        specialized = specialize_constraints(bn, constraints, seen, extra_parents)
+        internal_constraints, block_arcs, any_path_pairs, none_path_pairs = specialized
 
     old_score = bn.compute_score(seen)
     max_score = compute_max_score(data, bn)
@@ -550,9 +675,9 @@ def slimpass(bn: Union[TWBayesianNetwork, ConstrainedBayesianNetwork],
     try:
         if CONSTRAINED:
             replbn = solve_conbn(data, final_width_bound, bn.input_file,
-                                 internal_constraints, incoming_arcs, path_pairs,
-                                 external_pairs, forced_arcs, forced_cliques,
-                                 pset_acyc, timeout, debug)
+                                 internal_constraints, block_arcs, any_path_pairs,
+                                 none_path_pairs, extra_parents, forced_arcs,
+                                 forced_cliques, pset_acyc, timeout, debug)
         else:
             replbn = solve_bn(data, final_width_bound, bn.input_file, forced_arcs,
                               forced_cliques, pset_acyc, timeout, domain_sizes,
@@ -636,13 +761,17 @@ def slim(filename: str, start_treewidth: int, constraints: Constraints = None,
                           solver=heuristic)
 
     if CONSTRAINED:  # discard constraints not satisfied by heuristic
+        total_constraints = count_constraints(constraints)
         constraints = filter_satisfied_constraints(bn, constraints, True)
         bn = ConstrainedBayesianNetwork.fromTwBayesianNetwork(bn, constraints)
+        bn.record_initial_satisfied_constraints()
+        wandb.config.constraints_total = total_constraints
+        wandb.config.constraints_satisfied_initial = bn.total_satisfied_constraints()
 
     if __debug__: bn.verify()
     # save checkpoint: milestone > start
     if CHECKPOINT_MILESTONES:
-        write_res(bn, SAVE_AS.replace(".res", "-start.res"), write_elim_order=True)
+        write_res(bn, SAVE_AS.replace(".res", "_start.res"), write_elim_order=True)
     if USE_COMPLEXITY_WIDTH:
         start_cw = compute_complexity_width(bn.td, DOMAIN_SIZES)
         start_acw = compute_complexity_width(bn.td, DOMAIN_SIZES, approx=True)
@@ -668,6 +797,12 @@ def slim(filename: str, start_treewidth: int, constraints: Constraints = None,
     history = Counter(dict.fromkeys(bn.td.decomp.nodes, 0))
     if seed: random.seed(seed)
     cw_stop_looping = False
+
+    if budget >= bn.dag.number_of_nodes():  # entire instance within budget
+        print("budget can handle entire instance, dispatching single SAT call")
+        sat_timeout = max_time
+        max_passes = 1
+
     while max_passes < 0 or SOLUTION.num_passes <= max_passes:
         # if USE_COMPLEXITY_WIDTH and cw_stop_looping:
         #     if debug: print("*** initial bn score matched/surpassed ***\n")
@@ -689,6 +824,13 @@ def slim(filename: str, start_treewidth: int, constraints: Constraints = None,
             continue  # don't count this as a pass
         SOLUTION.num_passes += 1
         new_score = bn.score
+        # if CONSTRAINED:
+        #     new_constraints = bn.total_satisfied_constraints()
+        #     assert new_constraints >= prev_constraints, "replaced network satisfies" \
+        #                                                "fewer constraints"
+        #     if prev_constraints < new_constraints:
+        #         print(f"*** Improvement in constraint satisfaction! "
+        #               f"{prev_constraints} -> {new_constraints}")
         if new_score > prev_score:
             print(f"*** New improvement! {new_score:.5f} {elapsed()} ***")
             prev_score = new_score
@@ -724,6 +866,10 @@ def slim(filename: str, start_treewidth: int, constraints: Constraints = None,
                 # save checkpoint: milestone > lowpoint
                 if CHECKPOINT_MILESTONES:
                     write_res(bn, SAVE_AS.replace(".res", "-lowpoint.res"), write_elim_order=True)
+
+        if CONSTRAINED:
+            SOLUTION.constraints_satisfied = bn.total_satisfied_constraints()
+
         if debug and USE_COMPLEXITY_WIDTH: print("current msss:", current_cw)
         if debug: print(f"* Iteration {SOLUTION.num_passes}:\t{bn.score:.5f} {elapsed()}\n")
         if now() - start > max_time:
@@ -779,6 +925,8 @@ def wandb_configure(wandb: wandb, args):
         wandb.config.widthmode = "mw"
     elif args.heuristic.endswith("-cw"):
         wandb.config.widthmode = "cw"
+    
+    if CONSTRAINED: wandb.config.constrained = True  # remaining config params set in slim
 
     # process config
     wandb.config.platform = "cluster" if CLUSTER else "workstation"
@@ -800,7 +948,7 @@ parser.add_argument("-t", "--max-time", type=int, default=MAX_TIME,
                     help="max time for SLIM to run")
 parser.add_argument("-u", "--heuristic", default=HEURISTIC,
                     choices=["kg", "ka", "kmax", "hc", "hcp", "greedy-mw", "max-mw",
-                             "greedy-cw", "max-cw"], help="heuristic solver to use")
+                             "greedy-cw", "max-cw", "kg.adv"], help="heuristic solver to use")
 parser.add_argument("-o", "--offset", type=int, default=OFFSET,
                     help="duration after which slim takes over")
 parser.add_argument("-c", "--compare", action="store_true",
@@ -837,7 +985,7 @@ parser.add_argument("--heuristic-onlyfilter", action="store_true",
                          "(cwidth bound is only suggestive when this is enabled)")
 parser.add_argument("--autobudget-offset", type=int, default=AUTOBUDGET_OFFSET,
                     help="how much to offset cwidth/tw to obtain budget value"
-                         "(only applicable when budget=0 (i.e. autobudget mode)")
+                         "(only applicable when budget=0 (i.e. autobudget mode))")
 parser.add_argument("--constraint-file", help="path to constraint file, "
                                               "activates CONSTRAINED mode")
 parser.add_argument("--log-metrics", action="store_true",
@@ -883,6 +1031,7 @@ if __name__ == '__main__':
     LOG_METRICS = args.log_metrics
     if LOG_METRICS and not CHECKPOINT_MILESTONES:
         parser.error("--log-metrics switch requires --checkpoint-milestones option")
+    
     if args.budget == 0:  # auto-budget: set to nearest multiple of 5 (10, 15, 20, 25 ... )
         if USE_COMPLEXITY_WIDTH:
             min_domain_size = min(DOMAIN_SIZES.values())
@@ -894,6 +1043,7 @@ if __name__ == '__main__':
     if args.budget <= args.treewidth and not args.compare:
         print("budget smaller than treewidth bound, quitting", file=sys.stderr)
         sys.exit()
+    
     print("not"*__debug__, "running optimized")
     if args.start_with is not None:
         START_WITH = os.path.abspath(args.start_with)
@@ -903,16 +1053,15 @@ if __name__ == '__main__':
     LOGGING = args.logging
     SEED = args.random_seed
     if LOGGING:
+        print("initializing wandb...")
         wandb.init(project=args.project_name)
+        print("initialized wandb")
         wandb_configure(wandb, args)
         logger = wandb.log
     SOLUTION = Solution(logger=logger)
 
     # if comparison requested, compare then exit
     if args.compare:
-        if CONSTRAINED:
-            raise NotImplementedError("compare mode doesn't currently support"
-                                      "constrained bnsl")
         outfile = SAVE_AS or "temp.res"
         #logger = lambda x: print(f"log: {x}")  # local log
         common_args = dict(timeout=args.max_time, seed=SEED, outfile=outfile,
@@ -924,6 +1073,9 @@ if __name__ == '__main__':
                                           " iterative cwidth target reduction")
             monitor_blip(filepath, 0, logger, cwidth=FEASIBLE_CW_THRESHOLD,
                          onlyfilter=HEURISTIC_ONLYFILTER, **common_args)
+        elif CONSTRAINED:
+            monitor_blip(filepath, args.treewidth, logger,
+                         confile=CONSTRAINT_FILE, **common_args)
         else:
             monitor_blip(filepath, args.treewidth, logger, **common_args)
         sys.exit()
@@ -953,13 +1105,13 @@ if __name__ == '__main__':
             SOLUTION.value.verify(verify_treewidth=not USE_COMPLEXITY_WIDTH)
             print("verified")
             if SAVE_AS:
-                save_fname = SAVE_AS.replace(".res", "-final.res")
+                save_fname = SAVE_AS.replace(".res", "_final.res")
                 write_res(SOLUTION.value, save_fname, write_elim_order=True)
                 print("saving final network to", save_fname, "as final checkpoint")
                 # evaluate metrics
                 if LOG_METRICS:  # checkpoint milestones guaranteed guraranteed
                     finalres = save_fname
-                    startres = SAVE_AS.replace(".res", "-start.res")
+                    startres = SAVE_AS.replace(".res", "_start.res")
                     print("evaluating metrics for", finalres)
                     ll, maescore, maetime = eval_all(filepath, args.treewidth,
                                                      DATFILE, finalres, SEED)
