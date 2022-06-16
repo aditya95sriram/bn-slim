@@ -11,6 +11,7 @@ from glob import glob
 from time import sleep
 from itertools import islice
 import shutil
+import copy
 
 from utils import count_constraints, filled_in, TreeDecomposition, pairs, stream_bn, \
     get_bn_stats, filter_read_bn, compute_complexity_width, read_jkl, \
@@ -41,6 +42,9 @@ class BayesianNetwork(object):
         self.best_norm_score = self.best_score - sum(self.offsets.values())
         self._score = None
         self._dag = None
+
+    def copy(self):
+        return BayesianNetwork(self.input_file, self.data, parents=self.parents)
 
     def _clear_cached(self):
         self._score = self._dag = None
@@ -109,6 +113,20 @@ class BayesianNetwork(object):
         nx.draw(dag, pos, with_labels=True)
         plt.show()
 
+    def draw_parents(self, subset=None):
+        if subset is None:
+            dag = self.dag
+        else:
+            predecs = set()
+            for node in subset:
+                predecs.update(self.dag.predecessors(node))
+            dag = nx.subgraph_view(self.dag,
+                                   filter_node=lambda x: x in (predecs|subset),
+                                   filter_edge=lambda x,y: y in subset)
+        pos = pygraphviz_layout(dag, prog='dot')
+        nx.draw(dag, pos, with_labels=True)
+        plt.show()
+
     def replace(self, newbn: 'BayesianNetwork'):
         for node, new_parents in newbn.parents.items():
             self.parents[node] = new_parents
@@ -121,6 +139,16 @@ class TWBayesianNetwork(BayesianNetwork):
         self.tw = tw
         self.elim_order: List[int] = elim_order
         self._td: Optional[TreeDecomposition] = td
+
+    def copy(self):
+        elim_order_copy = self.elim_order[:] if self.elim_order else None
+        # shallow copy sufficient as parents stored in immutable frozensets
+        parents_copy = self.parents.copy()
+        bn = TWBayesianNetwork(self.input_file, self.tw,
+                               elim_order_copy, data=self.data,
+                               parents=parents_copy)
+        bn.done()
+        return bn
 
     @property
     def td(self) -> TreeDecomposition:
@@ -161,6 +189,9 @@ class CWBayesianNetwork(TWBayesianNetwork):
         self._td: Optional[TreeDecomposition] = td
         self.domain_sizes = get_domain_sizes(datfile)
 
+    def copy(self):
+        raise NotImplementedError
+
     def done(self):
         if self.elim_order is None:
             self.elim_order = list(nx.topological_sort(self.dag))[::-1]
@@ -180,6 +211,22 @@ class ConstrainedBayesianNetwork(TWBayesianNetwork):
         return ConstrainedBayesianNetwork(constraints, twbn.input_file, twbn.tw,
                                           twbn.elim_order, twbn.td,
                                           parents=twbn.parents)
+
+    def copy(self):
+        """not properly tested, use only on fresh bns"""
+        return copy.deepcopy(self)
+        assert self.elim_order == self.td.elim_order, "elim order mismatch between bn and td"
+        assert self.tw == self.td.width, "tw mismatch between bn and td"
+        elim_order_copy = self.elim_order[:] if self.elim_order else None
+        parents_copy = self.parents.copy()
+
+        graphcopy = self.td.graph.copy()
+        tdcopy = TreeDecomposition(graphcopy, elim_order_copy, self.td.width)
+        twbn = TWBayesianNetwork(self.input_file, self.tw, elim_order_copy,
+                                 td=tdcopy, parents=parents_copy)
+        conbn = ConstrainedBayesianNetwork.fromTwBayesianNetwork(twbn, self.constraints)
+        conbn.record_initial_satisfied_constraints()
+        return conbn
 
     def record_initial_satisfied_constraints(self):
         """record current set of satisfied constraints as the initial/target"""
@@ -203,16 +250,15 @@ class ConstrainedBayesianNetwork(TWBayesianNetwork):
         if not verify_constraints: return
         assert self.initial_satisfied_constraints, "no initial state recorded" \
                                                    "(needed for verification)"
-        current_satisfied_constraints = self.count_satisfied_constraints()
-        initial = self.initial_satisfied_constraints
-        for typ, count in current_satisfied_constraints.items():
-            if count < initial[typ]:
-                print("initial sat:", initial)
-                print("current sat:", current_satisfied_constraints)
-            assert count >= initial[typ], f"fewer {typ} constraints satisfied" \
-                                          f" compared to initial solution"
-            if count > initial[typ]:
-                print(f"### more {typ} constraints satisfied compared to initial solution!")
+        fail = self.spot_failing_constraint()
+        assert fail is None, f"constraint {fail} violated"
+        # current_satisfied_constraints = self.count_satisfied_constraints()
+        # initial = self.initial_satisfied_constraints
+        # for typ, count in current_satisfied_constraints.items():
+        #     assert count >= initial[typ], f"fewer {typ} constraints satisfied" \
+        #                                   f" compared to initial solution"
+        #     if count > initial[typ]:
+        #         print(f"+++ more {typ} constraints satisfied compared to initial solution!")
 
     def find_overlapping_relatives(self, node, seen: set, ancestors=True,
                                    adjust=True):
@@ -341,8 +387,10 @@ def parse_res(filename: str, treewidth: int, outfile: str, cwidth=-1,
                 raise err
             else:
                 if isinstance(result, float):
+                    assert score is None, f"multiple score lines, {outfile} possibly corrupted"
                     score = result
                 elif isinstance(result, list):
+                    assert elim_order is None, f"multiple elim_orders, {outfile} possibly corrupted"
                     elim_order = result
     if not debug: os.remove(outcopy)
     
