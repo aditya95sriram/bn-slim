@@ -386,8 +386,8 @@ def spot_failing_constraint(bn, constraints):
     return None
 
 
-class NoSolutionException(BaseException): pass
-class UnsatisfiableInstance(BaseException): pass
+class NoSolutionError(BaseException): pass
+class UnsatisfiableInstanceError(BaseException): pass
 
 
 def read_model(output: Union[str, TextIO]) -> set:
@@ -399,14 +399,14 @@ def read_model(output: Union[str, TextIO]) -> set:
         if line.startswith("v"):
             return set(map(int, line.split()[1:]))
         if "UNSATISFIABLE" in line:  # only if model not found
-            raise UnsatisfiableInstance
+            raise UnsatisfiableInstanceError
     # if model found, this line should not be reached
     if isinstance(output, TextIO): output.seek(0)
     with open("err-output.log", 'w') as err_out:
         for line in output:
             err_out.write(line)
-    raise NoSolutionException("model not found (no line starting with 'v'\n\t"
-                              "output written to err-output.log")
+    raise NoSolutionError("model not found (no line starting with 'v'\n\t"
+                          "output written to err-output.log")
 
 
 def read_model_from_file(filename: str) -> set:
@@ -710,9 +710,10 @@ class CWDecomposition(TreeDecomposition):
     
 if __name__ == '__main__':
     from blip import parse_res
-    bn = parse_res("../input/alarm-5000.jkl", 4, "../past-work/blip-publish/tmp.res")
+    #bn = parse_res("../input/alarm-5000.jkl", 4, "../past-work/blip-publish/tmp.res")
     #bn = parse_res("../input/sachs-5000.jkl", 4, "../past-work/blip-publish/tmp.res")
-    constraints = read_constraints("../input/constraint-files/alarm-20-1.con", int)
+    bn = parse_res("../input/hepar2-5000.jkl", 7, "../past-work/blip-publish/temp.res")
+    constraints = read_constraints("../input/constraint-files/all/hepar2-50-1.con", int)
     #constraints = read_constraints("../input/constraint-files/sachs-20-4.con", int)
     print("satisfied splits:", count_satisfied_constraints(bn, constraints))
     print("satisfied total:", total_satisfied_constraints(bn, constraints))
