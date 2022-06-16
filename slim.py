@@ -16,16 +16,15 @@ from operator import itemgetter
 from functools import reduce
 from heapq import heappop, heappush
 from math import log, ceil
-import re
 
 # internal
 from blip import run_blip, BayesianNetwork, TWBayesianNetwork, monitor_blip, \
     parse_res, start_blip_proc, check_blip_proc, stop_blip_proc, write_res, \
     activate_checkpoints, ConstrainedBayesianNetwork
-from utils import TreeDecomposition, count_constraints, pick, pairs, filter_read_bn, BNData, NoSolutionException, \
+from utils import TreeDecomposition, count_constraints, pick, pairs, filter_read_bn, BNData, NoSolutionError, \
     get_domain_sizes, log_bag_metrics, compute_complexity_width, weight_from_domain_size, \
     compute_complexity, compute_complexities, shuffled, Constraints, IntPairs, read_constraints, \
-    filter_satisfied_constraints
+    filter_satisfied_constraints, UnsatisfiableInstanceError
 from berg_encoding import solve_bn, PSET_ACYC
 from constrained_encoding import IntPairs, PathPairs, solve_conbn
 from eval_model import eval_all
@@ -73,7 +72,8 @@ AUTOBUDGET_OFFSET = 3
 LOG_METRICS = False  # log metrics like ll and mae to wandb
 LOGGING = False  # wandb logging
 CONSTRAINED = False  # whether solving constrained bn problem
-CONSTRAINT_FILE = ""
+CONSTRAINT_FILE = ""  # path to constraint file
+USE_FORCE_ARC_VARS = False  # whether to use the new force_arc variables in encoding
 
 
 def find_start_bag(td: TreeDecomposition, history: Counter = None, debug=False):
@@ -206,11 +206,8 @@ def prepare_subtree(bn: TWBayesianNetwork, bag_ids: set, seen: set, debug=False)
     data, pset_acyc = get_data_for_subtree(bn, boundary_nodes, seen, forced_arcs)
 
     extra_parents = identify_extra_parents(data, seen)
-    # extra_arcs = compute_extra_arcs(bn, data, seen, boundary_nodes)
-    extra_arcs = handle_acyclicity(bn, seen, extra_parents | boundary_nodes)
-    for u, v in extra_arcs:
-        if u in seen and v in seen: continue  # arc already added
-        forced_arcs.append((u, v))
+    extra_arcs = compute_extra_arcs(bn, extra_parents, seen, boundary_nodes)
+    forced_arcs = extra_arcs
 
     return forced_arcs, forced_cliques, data, pset_acyc, extra_parents
 
@@ -220,16 +217,21 @@ def get_data_for_subtree(bn: TWBayesianNetwork, boundary_nodes: set, seen: set,
     # store downstream relations in a graph
     downstream_graph = nx.DiGraph()
     downstream_graph.add_nodes_from(boundary_nodes)
+    subdag = nx.subgraph_view(bn.dag, filter_edge=lambda x, y: y not in seen)
     for node in boundary_nodes:
-        for _, successors in nx.bfs_successors(bn.dag, node):
-            downstream_graph.add_edges_from((node, succ) for succ in successors
-                                      if succ not in seen)
+        descendants = set(nx.descendants(subdag, node))
+        assert descendants.isdisjoint(seen), "descendant contains seen node"
+        downstream_graph.add_edges_from((node, desc) for desc in descendants)
+        # for _, successors in nx.bfs_successors(bn.dag, node):
+        #     downstream_graph.add_edges_from((node, succ) for succ in successors
+        #                               if succ not in seen)
     #downstream.remove_nodes_from(seen - boundary_nodes)  # ignore inner red nodes
     assert seen.intersection(downstream_graph.nodes).issubset(boundary_nodes), \
         "downstream connectivity graph contains inner nodes"
-    downstream_graph.add_edges_from(forced_arcs)
+    # downstream_graph.add_edges_from(forced_arcs)  # todo: check if ok
 
     downstream = set()
+    assert RELAXED_PARENTS, "need relaxed parents always"  # todo: remove later
     if not RELAXED_PARENTS:
         downstream = set(downstream_graph.nodes())-seen
 
@@ -250,12 +252,13 @@ def get_data_for_subtree(bn: TWBayesianNetwork, boundary_nodes: set, seen: set,
                     bag_id = bn.td.bag_containing(pset | {node})
                     if bag_id == -1:
                         continue  # reject because required bag doesnt already exist in td
-                    rem_parents = pset - pset_in
-                    req_acyc = set()
-                    for parent in rem_parents:
-                        if parent in downstream_graph:
-                            req_acyc.update(downstream_graph.predecessors(parent))
-                    if req_acyc: pset_acyc[(node, pset)] = req_acyc
+                    # todo: disabled pset_acyc
+                    # rem_parents = pset - pset_in
+                    # req_acyc = set()
+                    # for parent in rem_parents:
+                    #     if parent in downstream_graph:
+                    #         req_acyc.update(downstream_graph.predecessors(parent))
+                    # if req_acyc: pset_acyc[(node, pset)] = req_acyc
                 data[node][pset] = score
         else:  # internal node
             for pset, score in psets.items():
@@ -529,8 +532,8 @@ def identify_extra_parents(data: BNData, seen: set) -> set:
     return extra_parents
 
 
-def compute_extra_arcs(bn: TWBayesianNetwork, data: BNData,
-                       seen: set, leafs: set) -> Tuple[set, list]:
+def compute_extra_arcs(bn: TWBayesianNetwork, extra_parents: set,
+                       seen: set, leafs: set) -> List[tuple]:
     """
     Identify the nodes that can potentially act as parents for nodes
     from the seen set but have their own parents frozen/fixed
@@ -541,14 +544,14 @@ def compute_extra_arcs(bn: TWBayesianNetwork, data: BNData,
     :param leafs: internal nodes which interact with external nodes (boundary)
     :return: dict with extra parents as keys and their psets as values
     """
-    extra_parents = identify_extra_parents(data, seen)
-
-    extra_arcs = handle_acyclicity(bn, seen, extra_parents | leafs)
-    # extra_data = {node: set() for node in extra_parents}
-    # for u, v in extra_arcs:
-    #     extra_data[v].add(u)
-
-    return extra_parents, extra_arcs
+    extra_arcs = []
+    subdag = nx.subgraph_view(bn.dag, filter_edge=lambda x,y: y not in seen)
+    for src in seen | extra_parents:
+        for dest in extra_parents:
+            if src == dest: continue
+            if nx.has_path(subdag, src, dest):
+                extra_arcs.append((src, dest))
+    return extra_arcs
 
 
 def compute_max_score(data: BNData, bn: BayesianNetwork) -> float:
@@ -559,7 +562,8 @@ def compute_max_score(data: BNData, bn: BayesianNetwork) -> float:
 
 
 METRICS = ("start_score", "num_passes", "num_improvements", "skipped",
-           "nosolution", "restarts", "start_width", "constraints_satisfied")
+           "nosolution", "restarts", "start_width", "unsat", "violated",
+           "constraints_satisfied")
 
 
 class Solution(object):
@@ -572,7 +576,7 @@ class Solution(object):
         # for code completion
         self.start_score = self.num_passes = self.num_improvements = 0
         self.skipped = self.nosolution = self.restarts = self.start_width = 0
-        self.constraints_satisfied = 0
+        self.unsat = self.violated = self.constraints_satisfied = 0
         # set proper value for logger now
         self.logger = logger
 
@@ -628,7 +632,7 @@ def slimpass(bn: Union[TWBayesianNetwork, ConstrainedBayesianNetwork],
     # but don't allow their own parents to change
     # extra_data = compute_extra_arcs(bn, data, seen)
     # extra_parents = set(extra_data.keys())
-    if extra_parents: print("extra parents found")
+    if extra_parents: print("extra parents found:", extra_parents)
     # extra_parents = set()
 
     # process constraints if applicable
@@ -676,15 +680,20 @@ def slimpass(bn: Union[TWBayesianNetwork, ConstrainedBayesianNetwork],
         if CONSTRAINED:
             replbn = solve_conbn(data, final_width_bound, bn.input_file,
                                  internal_constraints, block_arcs, any_path_pairs,
-                                 none_path_pairs, extra_parents, forced_arcs,
+                                 none_path_pairs, extra_parents,
+                                 USE_FORCE_ARC_VARS, forced_arcs,
                                  forced_cliques, pset_acyc, timeout, debug)
         else:
             replbn = solve_bn(data, final_width_bound, bn.input_file, forced_arcs,
                               forced_cliques, pset_acyc, timeout, domain_sizes,
                               debug)
-    except NoSolutionException as err:
+    except NoSolutionError as err:
         SOLUTION.nosolution += 1
         print(f"no solution found by maxsat, skipping (reason: {err})")
+        return
+    except UnsatisfiableInstanceError:
+        SOLUTION.unsat += 1
+        print(f"!!! maxsat instance unsatisfiable, skipping")
         return
     new_score = replbn.compute_score()
     if not CLUSTER and debug:
@@ -714,7 +723,11 @@ def slimpass(bn: Union[TWBayesianNetwork, ConstrainedBayesianNetwork],
     td.replace(selected, forced_cliques, replbn.td)
     # update bn with new bn
     bn.replace(replbn)
-    if __debug__: bn.verify(verify_treewidth=not USING_COMPLEXITY_WIDTH)
+    if __debug__:
+        if CONSTRAINED:
+            bn.verify(verify_treewidth=True, verify_constraints=False)
+        else:
+            bn.verify(verify_treewidth=not USING_COMPLEXITY_WIDTH)
     return True
 
 
@@ -763,6 +776,8 @@ def slim(filename: str, start_treewidth: int, constraints: Constraints = None,
     if CONSTRAINED:  # discard constraints not satisfied by heuristic
         total_constraints = count_constraints(constraints)
         constraints = filter_satisfied_constraints(bn, constraints, True)
+        if USE_FORCE_ARC_VARS:
+            print("using force_arc vars")
         bn = ConstrainedBayesianNetwork.fromTwBayesianNetwork(bn, constraints)
         bn.record_initial_satisfied_constraints()
         wandb.config.constraints_total = total_constraints
@@ -797,6 +812,7 @@ def slim(filename: str, start_treewidth: int, constraints: Constraints = None,
     history = Counter(dict.fromkeys(bn.td.decomp.nodes, 0))
     if seed: random.seed(seed)
     cw_stop_looping = False
+    backup = None
 
     if budget >= bn.dag.number_of_nodes():  # entire instance within budget
         print("budget can handle entire instance, dispatching single SAT call")
@@ -815,6 +831,10 @@ def slim(filename: str, start_treewidth: int, constraints: Constraints = None,
             USING_COMPLEXITY_WIDTH = SOLUTION.num_passes >= 10 or CW_TRAV_STRAT != "tw-max-rand"
         width_bound = complexity_bound if USING_COMPLEXITY_WIDTH else start_treewidth
 
+        # take backup before performing replacement
+        if CONSTRAINED:
+            backup = bn.copy()
+
         # main forwarding call to slimpass
         replaced = slimpass(bn, budget, constraints, sat_timeout, history, width_bound, debug=False)
 
@@ -823,14 +843,18 @@ def slim(filename: str, start_treewidth: int, constraints: Constraints = None,
             #     print("failed slimpass (no subtree|lazy threshold|no maxsat soln)")
             continue  # don't count this as a pass
         SOLUTION.num_passes += 1
+
+        if CONSTRAINED:
+            fail = bn.spot_failing_constraint()
+            if fail is not None:
+                print(f"!!! solution bn violates {fail}, reverting to backup")
+                bn = backup
+                SOLUTION.violated += 1
+                continue
+            else:
+                bn.verify(verify_treewidth=True, verify_constraints=True)
+
         new_score = bn.score
-        # if CONSTRAINED:
-        #     new_constraints = bn.total_satisfied_constraints()
-        #     assert new_constraints >= prev_constraints, "replaced network satisfies" \
-        #                                                "fewer constraints"
-        #     if prev_constraints < new_constraints:
-        #         print(f"*** Improvement in constraint satisfaction! "
-        #               f"{prev_constraints} -> {new_constraints}")
         if new_score > prev_score:
             print(f"*** New improvement! {new_score:.5f} {elapsed()} ***")
             prev_score = new_score
@@ -988,6 +1012,9 @@ parser.add_argument("--autobudget-offset", type=int, default=AUTOBUDGET_OFFSET,
                          "(only applicable when budget=0 (i.e. autobudget mode))")
 parser.add_argument("--constraint-file", help="path to constraint file, "
                                               "activates CONSTRAINED mode")
+parser.add_argument("--use-force-arc-vars", action="store_true",
+                    help="whether to use force_arc variables in encoding"
+                         "(inconsequential if --constraint-file absent)")
 parser.add_argument("--log-metrics", action="store_true",
                     help="log metrics log-likelihood and mean absolute error")
 parser.add_argument("-r", "--random-seed", type=int, default=SEED,
@@ -1003,7 +1030,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     filepath = os.path.abspath(args.file)
     LAZY_THRESHOLD = args.lazy_threshold
-    RELAXED_PARENTS = args.relaxed_parents
+    RELAXED_PARENTS = True #args.relaxed_parents
     MIMIC = args.mimic
     DATFILE = args.datfile
     SAVE_AS = os.path.abspath(args.save_as) if args.save_as else ""
@@ -1018,6 +1045,7 @@ if __name__ == '__main__':
         CONSTRAINED = True
         CONSTRAINT_FILE = os.path.abspath(args.constraint_file)
         constraints = read_constraints(CONSTRAINT_FILE, typecast_node=int)
+        USE_FORCE_ARC_VARS = args.use_force_arc_vars
     else:
         constraints = None
     CW_TRAV_STRAT = args.cw_strategy
