@@ -10,7 +10,7 @@ import shutil
 
 # internal
 from samer_veith import SvEncoding, SelfNamingDict
-from utils import read_bn, read_model, BNData, TreeDecomposition, NoSolutionException, weights_from_domain_sizes
+from utils import read_bn, read_model, BNData, TreeDecomposition, NoSolutionError, weights_from_domain_sizes
 from utils import pairs, opairs, posdict_to_ordering, check_subgraph, get_domain_sizes
 from blip import TWBayesianNetwork
 from complexity_encoding import SvEncodingWithComplexity
@@ -92,9 +92,10 @@ class TwbnEncoding(SvEncoding):
                 weight = self.rounding * int(score / self.rounding)
                 if len(p) != 0 and weight == 0:  # causes floating point exception in solver
                     self._add_comment(f"skipping, because non-trivial parent with weight 0")
+                    self._add_comment(f"skipping the skip, because pset might be needed for the constraints")
                     # self._add_comment(f"forcing false")
                     # self._add_clause(-self.par[v][p])
-                    continue
+                    # continue
                 self._add_clause(self.par[v][p], weight=weight)
 
                 for _u in p:
@@ -113,7 +114,7 @@ class TwbnEncoding(SvEncoding):
         for _v, _u in self.forced_arcs:
             v, u = self.node_lookup[_v], self.node_lookup[_u]
             # slim-clause: acyc*(u,v) for each forced directed edge u->v
-            self._add_comment(f"[slim] forced acyc {_v}->{_u}")
+            self._add_comment(f"[slim] forced arc forcing acyc {_v}->{_u}")
             self._add_clause(self._acyc(v, u))
 
         # external parent set compelled acyc ordering
@@ -288,13 +289,13 @@ def solve_bn(data: BNData, treewidth: int, input_file: str, forced_arcs=None,
                 #                   f"\nrc: {err.returncode}, check {errfilename}")
                 print(f"error while running uwrmaxsat on {errcnf}"
                       f"\nrc: {err.returncode}, check {errfilename}")
-                raise NoSolutionException("nonzero returncode")
+                raise NoSolutionError("nonzero returncode")
         else:
             #raise RuntimeError(f"error while running uwrmaxsat on {errcnf}"
             #                   f"\nrc: {err.returncode}, no stdout captured")
             print(f"error while running uwrmaxsat on {errcnf}"
                   f"\nrc: {err.returncode}, no stdout captured")
-            raise NoSolutionException("nonzero returncode")
+            raise NoSolutionError("nonzero returncode")
     else:  # if no error while maxsat solving
         runtime = now() - start
         model = read_model(output)
