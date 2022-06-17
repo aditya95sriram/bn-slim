@@ -211,7 +211,7 @@ pip install -r optional_requirements.txt
 ## Directory Structure
 
 The directory structure should now be as follows (`.zip` files hidden for brevity, 
-`*` denotes the newly generated)
+`*` denotes the generated files)
 
 ```
 bnslim
@@ -246,7 +246,8 @@ bnslim
 │       └── ... 
 ├── datasets*
 |   ├── dat/
-|   └── jkl/
+|   ├── jkl/
+|   └── con/
 ├── experiments*
 |   ├── baseline_data.csv
 |   ├── heuristic_data.csv
@@ -421,7 +422,7 @@ If that doesn't work, try running with a `aaai` tagged commit.
 > [[pdf]](https://proceedings.neurips.cc/paper/2021/file/94e70705efae423efda1088614128d0b-Paper.pdf)
 
 
-`experiments/baseline_data.csv` and `experiments/heuristic_data.csv`
+`experiments/cwidth/baseline_data.csv` and `experiments/cwidth/heuristic_data.csv`
 contain all the data for the 16 datasets from `datasets.zip`, 
 for multiple treewidths, msss bounds and random seeds
 run with the following configuration:
