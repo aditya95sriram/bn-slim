@@ -7,7 +7,8 @@
 _These instructions have been tested on linux (last updated: 17th June 2022)_
 
 > Originally accepted at AAAI-21. The tags [cwidth] and [expert] refer to the 
-> two follow-up versions accepted at NeurIPS-21 and UAI-22 resp.
+> two follow-up versions accepted at NeurIPS-21 and UAI-22 resp. See [Results](#results)
+> section for publication details.
 
 ## Required programming languages and software
 
@@ -20,7 +21,7 @@ _These instructions have been tested on linux (last updated: 17th June 2022)_
 * `Python 2.7` (required to run ETL)
 
 > **Note:** Before you start, move all python (.py) files into the `slim` directory:
-  (See Section: Directory Structure)
+  (See Section: [Directory Structure](#directory-structure))
 
 
 ## External tools
