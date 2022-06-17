@@ -298,7 +298,7 @@ elimination ordering which isn't supported by it out-of-the-box.
 Additionally, it adds support for working with maximum state space
 size instead of treewidth.
 
-The patch applied to Merlin allows us to customize the elimination ordering
+[cwidth] The patch applied to Merlin allows us to customize the elimination ordering
 technique/heuristic of the variables via the `-M` command line argument.
 In our use-case, we pre-set the ordering in the uai file and supply `-M lex`
 to invoke the lexicographic ordering, thereby preserving and respecting
@@ -327,7 +327,7 @@ These are somewhat standard file formats for storing Bayesian Networks.
 The `.uai` format is required by Merlin and the `.net` format is used
 as an intermediate format to go from `.res -> .uai`.
 
-### `.evid` file type
+### `.evid` file type [cwidth]
 
 File format for supplying evidence to Merlin.
 
@@ -342,24 +342,18 @@ Run `python et_learn/hcet.py --help` for more details.
 > the one from dataset/jkl to obtain a new jkl file which can then be used as
 > input for BN-SLIM
 
+### `.con` file type [expert]
+
+Non-standard file format for representing expert constraints. It contains 
+one constraint per line in the format `<type> <from> <to>`, where 
+`<from>` and `<to>` are the endpoints of the constraint of type `<type>`.
+The supported constraint types are: positive/negative/undirected arc
+(denoting direct dependence) and positive/negative ancestry denoting 
+(indirect dependence).
+
+
 
 ## Results
-
-### NeurIPS 2021 paper
-
-`experiments/baseline_data.csv` and `experiments/heuristic_data.csv`
-contain all the data for the 16 datasets from `datasets.zip`, 
-for multiple treewidths, msss bounds and random seeds
-run with the following configuration:
-
-```sh
-python -O slim.py <dataset> <treewidth> -t5400 -u <heuristic> -d <datfile.dat> --start-with <heur_sol.res> -w --feasible-cw --feasible-cw-threshold <msssbound> -r<seed> --budget 0 -v"
-```
-
-Where `heur_sol.res` is the initial heuristic solution which was computed before-hand
-and supplied using the `--start-with` option, and `datfile.dat` is the datfile corresponding
-to the supplied dataset.
-
 
 ### AAAI 2020 paper (∆BIC analysis)
 
@@ -403,6 +397,22 @@ Where `sol.res` is the initial heuristic solution which was computed before-hand
 and supplied using the `--start-with` option.
 
 If that doesn't work, try running with a `aaai` tagged commit.
+
+### NeurIPS 2021 paper
+
+`experiments/baseline_data.csv` and `experiments/heuristic_data.csv`
+contain all the data for the 16 datasets from `datasets.zip`, 
+for multiple treewidths, msss bounds and random seeds
+run with the following configuration:
+
+```sh
+python -O slim.py <dataset> <treewidth> -t5400 -u <heuristic> -d <datfile.dat> --start-with <heur_sol.res> -w --feasible-cw --feasible-cw-threshold <msssbound> -r<seed> --budget 0 -v"
+```
+
+Where `heur_sol.res` is the initial heuristic solution which was computed before-hand
+and supplied using the `--start-with` option, and `datfile.dat` is the datfile corresponding
+to the supplied dataset.
+
 
 
 [1]: https://maxsat-evaluations.github.io/2019/descriptions.html
