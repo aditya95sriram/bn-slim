@@ -1038,13 +1038,13 @@ index 0000000..77b74f8
 +                if (con.type == Constraint.Type.NegativeAncestry || 
 +                    con.type == Constraint.Type.NegativeArc) {
 +                    boolean violated = con.violated(v, new_str[v].parents, this::var_visited, this::getDescendants);
-+                    if (violated) {
-+                        System.out.println("#### negative constraint violated by init clique");
-+                        System.out.println("constraint:" + con.from + "(" + con.type + ")" + con.to);
-+                        for (int u: initCl) {
-+                            System.out.println(u + "<-" + new_str[u]);
-+                        }
-+                    }
++                    // if (violated) {
++                    //     System.out.println("#### negative constraint violated by init clique");
++                    //     System.out.println("constraint:" + con.from + "(" + con.type + ")" + con.to);
++                    //     for (int u: initCl) {
++                    //         System.out.println(u + "<-" + new_str[u]);
++                    //     }
++                    // }
 +                    if (violated) return false;
 +                }
 +            }
