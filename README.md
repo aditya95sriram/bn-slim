@@ -188,8 +188,8 @@ The datasets are available in the `datasets` folder, which contains subfolders
 `dat`, `jkl` and `con` (see Section on File formats for more details).
 
 The Experimental results are contained in the `experiments` folder.
-The raw data from the experiments are provided as `.csv` files
-while the scatter plots are available in the `plots` subfolder.
+In addition to some plots, the raw data from the experiments are provided as
+`.csv` files.
 
 
 ## Requirements for BN-SLIM
@@ -244,11 +244,11 @@ bnslim
 |   └── et_learn*
 |       ├── hcet.py
 │       └── ... 
-├── datasets*
+├── datasets
 |   ├── dat/
 |   ├── jkl/
 |   └── con/
-├── experiments*
+├── experiments
 |   ├── cwidth/
 |   └── expert/
 └── slim
@@ -262,7 +262,6 @@ bnslim
     ├── samer_veith.py
     ├── slim.py
     ├── utils.py
-    ├── hcet.py
     └── verify_cwidth.py
 ```
 
@@ -462,6 +461,9 @@ to the supplied dataset.
 The data from the experimental evaluation for the paper are available as 
 `<method>_data.csv` files for the scores and `<method>_activity.csv` files
 for the improvement activity within the `experiments/expert` folder.
+
+The script `generate_constraints.py` was used to randomly select a subset
+of constraints (an equal number for each type) from the ground truth networks.
 
 
 
