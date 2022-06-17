@@ -1,0 +1,1315 @@
+diff --git a/api/src/main/java/ch/idsia/blip/api/learn/solver/tw/BrutalGreedyAdvSolverApi.java b/api/src/main/java/ch/idsia/blip/api/learn/solver/tw/BrutalGreedyAdvSolverApi.java
+index 04c24ad..a496682 100644
+--- a/api/src/main/java/ch/idsia/blip/api/learn/solver/tw/BrutalGreedyAdvSolverApi.java
++++ b/api/src/main/java/ch/idsia/blip/api/learn/solver/tw/BrutalGreedyAdvSolverApi.java
+@@ -22,6 +22,21 @@ public class BrutalGreedyAdvSolverApi extends TwSolverApi {
+     @Option(name = "-src", usage = "Advanced searcher")
+     private String searcher;
+ 
++    @Option(name = "-con", usage = "Constraints path (.con format)")
++    private String constraints_path;
++
++    @Option(name = "-conworse", usage = "Allow # satisfied constraints to worsen")
++    private boolean allow_constraint_worsening;
++
++    @Option(name = "-otfdesc", usage = "Compute descendants on the fly (don't store)")
++    private boolean on_the_fly_descendants;
++
++    @Option(name = "-densify", usage = "Try to find denser networks")
++    private boolean densify;
++
++    @Option(name = "-prepop", usage = "Pre-populate the network with ancestry paths (0 - off, 1 - fast, ..., inf - short)")
++    private int prepopulate_mode;
++
+     public static void main(String[] args) {
+         defaultMain(args, new BrutalGreedyAdvSolverApi());
+     }
+diff --git a/compile-blip.sh b/compile-blip.sh
+index 9033b61..319724c 100755
+--- a/compile-blip.sh
++++ b/compile-blip.sh
+@@ -1,19 +1,23 @@
+ cd core
+ 
++echo -n "compiling core..."
+ mvn clean install -DskipTests -q 
++echo "done"
+ 
+ cd ../api
+ 
++echo -n "compiling..."
+ mvn clean package -DskipTests -q
++echo "done"
+ 
+ cp target/api-1.0-jar-with-dependencies.jar ../blip.jar
+ 
+ cd ..
+ 
+-scp blip.jar scanagatta@ares.dti.supsi.ch:Tools/
++#scp blip.jar scanagatta@ares.dti.supsi.ch:Tools/
+ # scp blip.jar scanagatta@mango.idsia.ch:Tools/
+-scp blip.jar mauro.scanagatta@supsi.ch@blip.idsia.ch:/var/opt/www/blip/site-data/media/
++#scp blip.jar mauro.scanagatta@supsi.ch@blip.idsia.ch:/var/opt/www/blip/site-data/media/
+ 
+-cp blip.jar ~/Tools/
++#cp blip.jar ~/Tools/
+ 
+-cp blip.jar ../r.blip/inst/java
++#cp blip.jar ../r.blip/inst/java
+diff --git a/core/pom.xml b/core/pom.xml
+index 4ae12fb..1d86240 100644
+--- a/core/pom.xml
++++ b/core/pom.xml
+@@ -31,8 +31,8 @@
+                 <artifactId>maven-compiler-plugin</artifactId>
+                 <version>3.5.1</version>
+                 <configuration>
+-                    <source>1.6</source>
+-                    <target>1.6</target>
++                    <source>8</source>
++                    <target>8</target>
+                 </configuration>
+             </plugin>
+         </plugins>
+diff --git a/core/src/main/java/ch/idsia/blip/core/common/Constraint.java b/core/src/main/java/ch/idsia/blip/core/common/Constraint.java
+new file mode 100644
+index 0000000..1e9eefc
+--- /dev/null
++++ b/core/src/main/java/ch/idsia/blip/core/common/Constraint.java
+@@ -0,0 +1,68 @@
++package ch.idsia.blip.core.common;
++
++import java.util.HashSet;
++import java.util.function.Predicate;
++import java.util.function.Function;
++
++import static ch.idsia.blip.core.utils.data.ArrayUtils.find;
++import static ch.idsia.blip.core.utils.data.ArrayUtils.isDisjoint;
++
++public class Constraint {
++
++    public enum Type {
++        PositiveAncestry, NegativeAncestry, UndirectedAncestry,
++        PositiveArc, NegativeArc, UndirectedArc
++    }
++
++    // type of constraint
++    public Type type;
++
++    // constraint from
++    public int from;
++
++    // constraint to
++    public int to;
++
++    // whether satisfied
++    public boolean satisfied;
++
++    public Constraint(Type type, int from, int to) {
++        this.type = type;
++        this.from = from;
++        this.to = to;
++    }
++
++    // return other variable involved in constraint (i.e., other endpoint of arc/ancestry)
++    // mainly useful for dealing with undirected constraints
++    public int other(int from_or_to) {
++        assert from_or_to == from || from_or_to == to;
++        return from_or_to == from ? to : from;
++    }
++
++    public String toString() {
++        return "constraint: " + type.toString() + "(" + Integer.toString(from) + ", " + Integer.toString(to) + ")";
++    }
++
++    public boolean violated(int v, int[] parents, Predicate<Integer> var_visited, Function<Integer, HashSet<Integer>> getDescendants) {
++        int ot = other(v);
++
++        switch (type) {
++            case PositiveArc:
++                return !find(ot, parents);
++            case UndirectedArc:
++                // only reject pset if other already visited in elim order and still not in pset
++                return var_visited.test(ot) && !find(ot, parents);
++            case NegativeArc:
++                return find(ot, parents);
++
++            case PositiveAncestry:
++                return isDisjoint(getDescendants.apply(ot), parents) && !find(ot, parents);
++            case UndirectedAncestry:
++                // only reject pset if other already visited in elim order and still not ancestor
++                return var_visited.test(ot) && isDisjoint(getDescendants.apply(ot), parents) && !find(ot, parents);
++            case NegativeAncestry:
++                return !isDisjoint(getDescendants.apply(ot), parents) || find(ot, parents);
++        }
++        return false;
++    }
++}
+\ No newline at end of file
+diff --git a/core/src/main/java/ch/idsia/blip/core/common/ConstraintSet.java b/core/src/main/java/ch/idsia/blip/core/common/ConstraintSet.java
+new file mode 100644
+index 0000000..a8500c1
+--- /dev/null
++++ b/core/src/main/java/ch/idsia/blip/core/common/ConstraintSet.java
+@@ -0,0 +1,136 @@
++package ch.idsia.blip.core.common;
++
++
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.logging.Logger;
++import java.util.function.Predicate;
++import java.util.function.Function;
++
++import static ch.idsia.blip.core.utils.data.ArrayUtils.toHashSet;
++
++
++public class ConstraintSet {
++
++    private static final Logger log = Logger.getLogger(
++            ConstraintSet.class.getName());
++
++    // Number of variables
++    public int n_var;
++
++    // Number of constraints (counts undirected constraints only once)
++    public int num_constraints;
++
++    // List of constraints indexed by vertices
++    // todo: rethink (maybe use 2d matrix, maybe also possible to store just one constraint per coordinate)
++    // todo: do we need fromVerts and toVerts (redundant but mirrored data)
++    // {to: {from: [list of constraints]}}
++    public HashMap<Integer, HashMap<Integer, HashSet<Constraint>>> constraints;
++    // todo: maybe upgrade to HashSet<Integer>[]
++    public HashMap<Integer, HashSet<Integer>> compiled;  // {to: {froms}}
++
++    public ConstraintSet(int n_var) {
++        this.n_var = n_var;
++        constraints = new HashMap<Integer, HashMap<Integer, HashSet<Constraint>>>();
++        for (int to = 0; to < n_var; to++)
++            constraints.put(to, new HashMap<Integer, HashSet<Constraint>>());
++        // log.info("default constructor," + Integer.toString(n_var) + " variables");
++    }
++
++    public void add(Constraint constraint) {
++        compiled = null;  // nullify compiled poset upon any addition
++        int from = constraint.from, to = constraint.to;
++        if (!constraints.get(to).containsKey(from))  // first time? first time?
++            constraints.get(to).put(from, new HashSet<Constraint>());
++        constraints.get(to).get(from).add(constraint);
++
++        // insert undirected constraints into both hashsets
++        if (constraint.type == Constraint.Type.UndirectedAncestry ||
++            constraint.type == Constraint.Type.UndirectedArc) {
++            if (!constraints.get(from).containsKey(to))
++                constraints.get(from).put(to, new HashSet<Constraint>());
++            constraints.get(from).get(to).add(constraint);
++        }
++        this.num_constraints++;
++    }
++
++    public ArrayList<Constraint> allTo(int to) {
++        ArrayList<Constraint> all_constraints = new ArrayList<Constraint>();
++        for (int from: constraints.get(to).keySet())
++            all_constraints.addAll(constraints.get(to).get(from));
++        return all_constraints;
++    }
++
++    public ArrayList<Constraint> allFrom(int from) {
++        ArrayList<Constraint> all_constraints = new ArrayList<Constraint>();
++        for (int to: constraints.keySet()) {
++            all_constraints.addAll(constraints.get(to).get(from));
++        }
++        return all_constraints;
++    }
++
++    // return all constraints as an ArrayList
++    // (warning: contains undirected constraints twice)
++    public ArrayList<Constraint> all() {
++        ArrayList<Constraint> all_constraints = new ArrayList<Constraint>();
++        for (int to = 0; to < n_var; to++)
++            all_constraints.addAll(allTo(to));
++        return all_constraints;
++    }
++
++    public ArrayList<Constraint> allUnique() {
++        ArrayList<Constraint> unique_constraints = new ArrayList<Constraint>();
++        for (int to : constraints.keySet()) {
++            for (int from : constraints.get(to).keySet()) {
++                if (from < to) {
++                    unique_constraints.addAll(constraints.get(to).get(from));
++                } else {
++                    for (Constraint constraint : constraints.get(to).get(from)) {
++                        if (!(constraint.type == Constraint.Type.UndirectedAncestry ||
++                                constraint.type == Constraint.Type.UndirectedArc))
++                            unique_constraints.add(constraint);
++                    }
++                }
++            }
++        }
++        return unique_constraints;
++    }
++
++    // representing poset as dictionary of predecessors
++    // todo: maybe simplify poset (no contradictions/redundancies, all possible combinations on 6x6 matrix)
++    public HashMap<Integer, HashSet<Integer>> compilePoset() {
++        if (compiled != null) return compiled;
++
++        // initialize poset
++        compiled = new HashMap<Integer, HashSet<Integer>>();
++        for (int to = 0; to < n_var; to++)
++            compiled.put(to, new HashSet<Integer>());
++
++        for (Constraint constraint: all()) {
++            if (constraint.type == Constraint.Type.PositiveArc ||
++                constraint.type == Constraint.Type.PositiveAncestry)
++            compiled.get(constraint.to).add(constraint.from);
++        }
++
++        return compiled;
++    }
++
++    // warning: only to be invoked for completed networks!
++    public int countSatisfied(BayesianNetwork bn) {
++        Predicate<Integer> var_visited = (Integer v) -> true;  // all variables are considered visited
++        Function<Integer, HashSet<Integer>> getDescendants = (Integer from) -> toHashSet(bn.getAncestors(from));
++
++        int count = 0;
++        for (Constraint constraint: allUnique()) {
++            int to = constraint.to, from = constraint.from;
++            boolean violated = constraint.violated(to, bn.parents(to), var_visited, getDescendants);
++            // undirected constraints only considered violated if both orientations violated
++            if (constraint.type == Constraint.Type.UndirectedArc ||
++                constraint.type == Constraint.Type.UndirectedAncestry)
++                violated &= constraint.violated(from, bn.parents(from), var_visited, getDescendants);
++            if (!violated) count++;
++        }
++        return count;
++    }
++}
+diff --git a/core/src/main/java/ch/idsia/blip/core/learn/solver/BaseSolver.java b/core/src/main/java/ch/idsia/blip/core/learn/solver/BaseSolver.java
+index 3a4a318..2c41fdc 100644
+--- a/core/src/main/java/ch/idsia/blip/core/learn/solver/BaseSolver.java
++++ b/core/src/main/java/ch/idsia/blip/core/learn/solver/BaseSolver.java
+@@ -7,6 +7,7 @@ import ch.idsia.blip.core.common.arcs.Directed;
+ import ch.idsia.blip.core.learn.solver.ps.Provider;
+ import ch.idsia.blip.core.learn.solver.samp.Sampler;
+ import ch.idsia.blip.core.learn.solver.src.Searcher;
++import ch.idsia.blip.core.learn.solver.src.brutal.BrutalOldSearcher;
+ import ch.idsia.blip.core.utils.data.array.TDoubleArrayList;
+ import ch.idsia.blip.core.utils.other.ParentSet;
+ import ch.idsia.blip.core.utils.other.RandomStuff;
+@@ -21,6 +22,7 @@ import java.util.concurrent.TimeUnit;
+ import java.util.logging.Logger;
+ 
+ import static ch.idsia.blip.core.utils.data.ArrayUtils.sameArray;
++import static ch.idsia.blip.core.utils.data.ArrayUtils.reverse;
+ import static ch.idsia.blip.core.utils.other.RandomStuff.*;
+ 
+ 
+@@ -36,6 +38,9 @@ public abstract class BaseSolver extends App {
+     // Best structure found yet
+     public ParentSet[] best_str;
+ 
++    // Best elim order found yet
++    public int[] best_vars;
++
+     public boolean testAcycility = false;
+ 
+     public int n_var;
+@@ -113,6 +118,8 @@ public abstract class BaseSolver extends App {
+         }
+     }
+ 
++    public BaseSearcher[] mysrcs;
++
+     public ParentSet[] go() {
+ 
+         prepare();
+@@ -126,6 +133,8 @@ public abstract class BaseSolver extends App {
+ 
+         almost();
+ 
++        mysrcs = new BaseSearcher[thread_pool_size];
++
+         try {
+             ExecutorService es = Executors.newCachedThreadPool();
+ 
+@@ -133,7 +142,8 @@ public abstract class BaseSolver extends App {
+                 if (verbose > 0) {
+                     logf("Starting %d searcher \n", i);
+                 }
+-                es.execute(getNewSearcher(i));
++                mysrcs[i] = getNewSearcher(i);
++                es.execute(mysrcs[i]);
+             }
+ 
+             es.shutdown();
+@@ -248,6 +258,9 @@ public abstract class BaseSolver extends App {
+             w = getWriter(s);
+ 
+             // writer.graph("Quick Structure: " + printQuick(best_str));
++            int[] elim_order = best_vars.clone();
++            reverse(elim_order);
++            wf(w, "elim-order: %s\n", " (" + combine(elim_order, ",") + ")");
+ 
+             // writer.graph("\n\nExpanded Structure: \n\n");
+             if (str != null && str.length > 0) {
+@@ -333,6 +346,10 @@ public abstract class BaseSolver extends App {
+     }
+ 
+     public void newStructure(ParentSet[] new_str) {
++        newStructure(new_str, -1);
++    }
++
++    public void newStructure(ParentSet[] new_str, int thread) {
+ 
+         if (new_str == null) {
+             return;
+@@ -371,6 +388,9 @@ public abstract class BaseSolver extends App {
+ 
+                 atLeastOne = true;
+ 
++                if (mysrcs[thread].src instanceof BrutalOldSearcher)
++                    best_vars = ((BrutalOldSearcher) mysrcs[thread].src).vars.clone();
++
+                 if (res_path != null) {
+                     writeStructure(res_path, best_sk, new_str);
+                 }
+@@ -494,7 +514,7 @@ public abstract class BaseSolver extends App {
+             this.thread = thread;
+         }
+ 
+-        private Searcher src;
++        public Searcher src;
+ 
+         @Override
+         public void run() {
+@@ -509,7 +529,7 @@ public abstract class BaseSolver extends App {
+                 ParentSet[] str = src.search();
+ 
+                 // Propose the new solution
+-                newStructure(str);
++                newStructure(str, thread);
+ 
+                 checkTime();
+             }
+diff --git a/core/src/main/java/ch/idsia/blip/core/learn/solver/brtl/BrutalSolver.java b/core/src/main/java/ch/idsia/blip/core/learn/solver/brtl/BrutalSolver.java
+index 647a916..e650eda 100644
+--- a/core/src/main/java/ch/idsia/blip/core/learn/solver/brtl/BrutalSolver.java
++++ b/core/src/main/java/ch/idsia/blip/core/learn/solver/brtl/BrutalSolver.java
+@@ -4,11 +4,15 @@ package ch.idsia.blip.core.learn.solver.brtl;
+ import ch.idsia.blip.core.learn.solver.ScoreSolver;
+ import ch.idsia.blip.core.learn.solver.ps.MaxScoreProvider;
+ import ch.idsia.blip.core.learn.solver.ps.Provider;
++import ch.idsia.blip.core.learn.solver.samp.PosetSampler;
+ import ch.idsia.blip.core.learn.solver.samp.Sampler;
+ import ch.idsia.blip.core.learn.solver.src.Searcher;
+ import ch.idsia.blip.core.learn.solver.src.brutal.*;
+ import ch.idsia.blip.core.utils.other.ParentSet;
+ 
++import ch.idsia.blip.core.common.ConstraintSet;
++import static ch.idsia.blip.core.utils.other.ConstraintUtils.getConstraintSet;
++
+ import java.util.HashMap;
+ 
+ import static ch.idsia.blip.core.learn.solver.samp.SamplerUtils.getAdvSampler;
+@@ -25,6 +29,15 @@ public class BrutalSolver extends ScoreSolver {
+ 
+     public String searcher;
+ 
++    public String constraints_path;
++    public boolean constrained;
++    public ConstraintSet constraints;
++    public boolean allow_constraint_worsening;
++    public int max_constraints_sat;
++    public boolean on_the_fly_descendants;
++    public boolean densify;
++    public int prepopulate;
++
+     // public List<Clique> bestJuncTree;
+ 
+     @Override
+@@ -43,17 +56,59 @@ public class BrutalSolver extends ScoreSolver {
+         if (verbose > 0) {
+             log("tw: " + tw + "\n");
+             log("sampler: " + sampler + "\n");
+-            log("sercher: " + searcher + "\n");
++            log("searcher: " + searcher + "\n");
++            log("constraints: " + constraints_path + "\n");
++        }
++
++        if (constrained) { // read in constraints
++            if (verbose > 0) {
++                log("[constrained] reading in constraints...\n");
++                log("[constrained] allow constraint worsening: " + allow_constraint_worsening + "\n");
++                log("[constrained] on-the-fly descendants: " + on_the_fly_descendants + "\n");
++                log("[constrained] densify: " + densify + "\n");
++                log("[constrained] prepopulate: " + prepopulate + "\n");
++            }
++            try {
++                constraints = getConstraintSet(constraints_path, n_var);
++            } catch (Exception ex) {
++                log("caught exception: " + ex);
++            }
++
++//            assert constraints != null;
++//            for (Integer from: constraints.constraints.keySet()) {
++//                log(from + ":\n");
++//                for (Integer to: constraints.constraints.get(from).keySet()) {
++//                    log("\t" + to + ":\n");
++//                    for (Constraint con: constraints.constraints.get(from).get(to)) {
++//                        log("\t\t" + con.toString() + "\n");
++//                    }
++//                }
++//            }
+         }
++
+     }
+ 
+     @Override
+     public void init(HashMap<String, String> options) {
+         super.init(options);
+         sampler = gStr("sampler", null);
+-        searcher = gStr("sercher", null);
++        searcher = gStr("searcher", null);
++        allow_constraint_worsening = gBool("allow_constraint_worsening");
++        on_the_fly_descendants = gBool("on_the_fly_descendants");
++        densify = gBool("densify");
++        prepopulate = gInt("prepopulate_mode", 0);
+ 
+         tw = gInt("tw", 5);
++        constraints_path = gStr("constraints_path", null);
++        if ("null".equals(constraints_path)) {
++            constraints_path = null;  // todo: needed?
++            constrained = false;
++        } else {
++            constrained = true;
++            // just for logging, doesn't affect program flow
++            sampler = "poset";
++            searcher = "constrained";
++        }
+     }
+ 
+     @Override
+@@ -63,12 +118,19 @@ public class BrutalSolver extends ScoreSolver {
+ 
+     @Override
+     public Sampler getSampler() {
+-        return getAdvSampler(sampler, dat_path, sc.length, this.rand);
++        if (constrained) {
++            return new PosetSampler(sc.length, this.rand, constraints.compilePoset());
++        } else {
++            return getAdvSampler(sampler, dat_path, sc.length, this.rand);
++        }
+     }
+ 
+     @Override
+     protected Searcher getSearcher() {
+-        if ("old".equals(searcher)) {
++        if (constrained) {
++            return new BrutalConstrainedOldSearcher(this, tw, constraints, on_the_fly_descendants, densify,
++                                                    prepopulate);
++        } else if ("old".equals(searcher)) {
+             return new BrutalOldSearcher(this, tw);
+         } else if ("new".equals(searcher)) {
+             return new BrutalNewGreedySearcher(this, tw);
+@@ -86,6 +148,31 @@ public class BrutalSolver extends ScoreSolver {
+         super.init(sc, time);
+     }
+ 
++    @Override
++    public void newStructure(ParentSet[] new_str, int thread) {
++        if (new_str == null) return;
++
++        if (constrained) {  // check if number of constraints satisfied doesn't worsen
++            synchronized (lock) {  // todo: check if really needed (probably yes, due to updating max_constraints_sat)
++                assert mysrcs[thread].src instanceof BrutalConstrainedOldSearcher;
++                int num_constraints_sat = ((BrutalConstrainedOldSearcher) mysrcs[thread].src).countSatisfied();
++                // todo: maybe make compatible with out_solutions to store suboptimal solutions
++                if (allow_constraint_worsening || num_constraints_sat >= max_constraints_sat) {
++                    max_constraints_sat = Math.max(max_constraints_sat, num_constraints_sat);
++                    if (getSk(new_str) > best_sk && verbose > 0)  // this is the current best, print # satisfied constraints
++                        System.out.println("[constrained] # constraints: " + num_constraints_sat + "/" + constraints.num_constraints);
++                    super.newStructure(new_str, thread);  // nested synchronized ok (stackoverflow/a/4883755/1614140)
++//                    System.exit(0);
++                } else {
++                    // increment #iterations regardless of improvement or not
++                    numIter++;
++                }
++            }
++        } else {
++            super.newStructure(new_str, thread);
++        }
++    }
++
+     /*
+      public void propose(double new_sk, ParentSet[] new_str, List<Clique> junctTree) {
+      synchronized (lock) {
+diff --git a/core/src/main/java/ch/idsia/blip/core/learn/solver/samp/PosetSampler.java b/core/src/main/java/ch/idsia/blip/core/learn/solver/samp/PosetSampler.java
+new file mode 100644
+index 0000000..b84bc1e
+--- /dev/null
++++ b/core/src/main/java/ch/idsia/blip/core/learn/solver/samp/PosetSampler.java
+@@ -0,0 +1,116 @@
++package ch.idsia.blip.core.learn.solver.samp;
++
++
++import ch.idsia.blip.core.utils.data.ArrayUtils;
++
++import java.util.*;
++
++
++public class PosetSampler implements Sampler {
++
++    private final int n;
++    private final Random r;
++    private final HashMap<Integer, HashSet<Integer>> poset;
++    private final int[] present;  // variables in the poset
++    private final int[] absent;  // variables not featuring in the poset
++
++    private Object lock = new Object();
++
++    public PosetSampler(int n, Random r, HashMap<Integer, HashSet<Integer>> poset) {
++        this.n = n;
++        this.r = r;
++        this.poset = poset;  // {to: {froms}}
++
++        boolean[] visited = new boolean[n];
++        for (Integer to: poset.keySet()) {
++            if (poset.get(to).isEmpty()) continue;
++            visited[to] = true;
++            for (Integer from: poset.get(to)) {
++                visited[from] = true;
++            }
++        }
++
++        int visited_count = 0;
++        for (boolean b: visited) {
++            if (b) visited_count++;
++        }
++        present = new int[visited_count];
++        for (int i = 0, idx=0; i < n; i++) {
++            if (visited[i]) present[idx++] = i;
++        }
++        absent = new int[n - visited_count];
++        for (int i = 0, idx=0; i < n; i++) {
++            if (!visited[i]) absent[idx++] = i;
++        }
++    }
++
++    // inplace shuffle array
++    private int[] shuffle(int[] ar) {
++        synchronized (lock) {
++            for (int j = 0; j < Math.max(3, ar.length / 10); j++) {
++                for (int i = ar.length; i-- > 1;) {
++                    ArrayUtils.swap(ar, i, r.nextInt(i));
++                }
++            }
++        }
++        return ar;
++    }
++
++    // merge two arrays in a randomized manner (inspired by merge-sort merge operation)
++    private int[] random_merge(int[] a, int[] b) {
++        int newlen = a.length + b.length;
++        int[] c = new int[newlen];
++        boolean pick_a;
++        for (int ci=0, ai=0, bi=0; ci < newlen; ci++) {
++            // check if any of a or b already exhausted, if not, pick randomly
++            pick_a = ai < a.length && (bi >= b.length || r.nextBoolean());
++            c[ci] = pick_a ? a[ai++] : b[bi++];
++            // c[ci] = (ai >= a.length ? false : (bi >= b.length ? true : r.nextBoolean())) ? a[ai++] : b[bi++];
++        }
++        return c;
++    }
++
++    @Override
++    public int[] sample() {
++
++        /* Step 1: shuffle absent variables separately */
++        shuffle(absent);
++
++        /* Step 2: compute random topsort of poset */
++        shuffle(present);
++
++        // compute initial outdegrees
++        HashMap<Integer, Integer> outdegrees = new HashMap<Integer, Integer>();
++        for (Integer from: present) outdegrees.put(from, 0);
++        for (Integer to: poset.keySet()) {
++            for (Integer from : poset.get(to)) {
++                outdegrees.put(from, outdegrees.get(from) + 1);
++            }
++        }
++
++        // initialize queue with 0 outdegree (sink) nodes
++        Queue<Integer> sinks = new LinkedList<Integer>();
++        for (Integer from: outdegrees.keySet())
++            if (outdegrees.get(from) == 0) sinks.add(from);
++
++        // iteratively remove sinks while inserting newly formed sinks
++        int[] topsort = new int[present.length];
++        int cursink, new_degree;
++        for (int idx = present.length - 1; idx >= 0; idx--) {
++            cursink = sinks.remove();
++            topsort[idx] = cursink;
++            for (Integer from: poset.get(cursink)) {
++                new_degree = outdegrees.get(from) - 1;
++                outdegrees.put(from, new_degree);
++                if (new_degree == 0)
++                    sinks.add(from);
++            }
++        }
++
++        /* Step 3: merge two sequences (present, absent) randomly */
++        return random_merge(topsort, absent);
++    }
++
++    @Override
++    public void init() {}
++}
+diff --git a/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/AuxSearcher.java b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/AuxSearcher.java
+index a0aec9b..adfbe0c 100644
+--- a/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/AuxSearcher.java
++++ b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/AuxSearcher.java
+@@ -41,6 +41,7 @@ public class AuxSearcher extends WinObsSearcher {
+                         new_parents[j] = pos;
+                     } else {
+                         keep = false;
++                        break;
+                     }
+                 }
+                 if (keep) {
+diff --git a/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalConstrainedOldSearcher.java b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalConstrainedOldSearcher.java
+new file mode 100644
+index 0000000..77b74f8
+--- /dev/null
++++ b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalConstrainedOldSearcher.java
+@@ -0,0 +1,469 @@
++package ch.idsia.blip.core.learn.solver.src.brutal;
++
++import ch.idsia.blip.core.common.Constraint;
++import ch.idsia.blip.core.common.ConstraintSet;
++import ch.idsia.blip.core.learn.solver.BaseSolver;
++import ch.idsia.blip.core.utils.data.SIntSet;
++import ch.idsia.blip.core.utils.other.Pair;
++import ch.idsia.blip.core.utils.other.ParentSet;
++
++import java.util.*;
++
++import static ch.idsia.blip.core.utils.data.ArrayUtils.*;
++
++public class BrutalConstrainedOldSearcher extends BrutalOldSearcher {
++
++    public ConstraintSet constraints;
++
++    private final HashMap<Integer, HashSet<Integer>> all_potential_parents;
++
++    // whether to store descendants or compute on the fly
++    private final boolean on_the_fly_descendants;
++    // set of all variables that could be ancestors in constraints
++    private final HashSet<Integer> constraint_ancestors;
++    // current set of descendants for each node
++    // todo: maybe upgrade to HashSet<Integer>[]
++    // todo: maybe some culling needed, might grow pretty quickly
++    public HashMap<Integer, HashSet<Integer>> descendants;
++
++    private final boolean densify;
++
++    // prepopulating ancestry path related variables
++    private final int prepopulate;
++    private final ArrayList<Pair<Integer, Integer>> ancestry_pairs;
++    private HashMap<Integer, HashSet<Integer>> prepopulated_parents;
++
++
++    private void initializePotentialParents() {
++        for (int to = 0; to < n_var; to++) {
++            all_potential_parents.put(to, new HashSet<>());
++            for (ParentSet pset: m_scores[to]) {
++                for (int parent: pset.parents)
++                    all_potential_parents.get(to).add(parent);
++            }
++        }
++    }
++
++    private boolean checkArcPossible(int from, int to) {
++        return all_potential_parents.get(to).contains(from);
++    }
++
++    private boolean checkAncestryPossible(int from, int to) {
++        // perform dfs starting at to and searching for from
++        HashSet<Integer> visited = new HashSet<Integer>();
++        Queue<Integer> queue = new LinkedList<Integer>();
++        queue.add(to);
++        visited.add(to);
++        while (!queue.isEmpty()) {
++            int cur = queue.remove();
++            // add all unvisited parents to queue
++            for (ParentSet pset: m_scores[cur]) {
++                for (int parent: pset.parents) {
++                    if (parent == from) return true;
++                    if (visited.contains(parent)) continue;
++                    queue.add(parent);
++                    visited.add(parent);
++                }
++            }
++        }
++        return false;
++    }
++
++    public boolean checkConstraintsPossible() {
++        int from, to;
++        for (Constraint constraint: constraints.allUnique()) {
++            from = constraint.from;
++            to = constraint.to;
++
++            switch (constraint.type) {
++
++                case PositiveArc:
++                    if (!checkArcPossible(from, to))
++                        return false;
++                    break;
++
++                case UndirectedArc:
++                    if (!checkArcPossible(from, to) && !checkArcPossible(to, from))
++                        return false;
++                    break;
++
++                case PositiveAncestry:
++                    if (!checkAncestryPossible(from, to))
++                        return false;
++                    break;
++
++                case UndirectedAncestry:
++                    if (!checkAncestryPossible(from, to) && !checkAncestryPossible(to, from))
++                        return false;
++                    break;
++
++            }
++
++        }
++        return true;  // no unsatisfiable constraint
++    }
++
++    protected void initializeDescendants() {
++        // only track descendants of variables involved in ancestry constraint
++        for (Constraint con: constraints.all()) {
++            switch (con.type) {
++                case PositiveAncestry:
++                case NegativeAncestry:
++                    constraint_ancestors.add(con.from);
++                    break;
++                case UndirectedAncestry:
++                    // in case of undirected ancestry constraints, track both variables
++                    constraint_ancestors.add(con.from);
++                    constraint_ancestors.add(con.to);
++                    break;
++                default:
++                    break;
++            }
++        }
++
++        for (int anc: constraint_ancestors)
++            descendants.put(anc, new HashSet<Integer>());
++    }
++
++    // deprecated: extremely expensive even for networks with ~30 variables
++    private ArrayList<ArrayList<Integer>> allPaths(int from, int to, ArrayList<Integer> path) {
++        ArrayList<ArrayList<Integer>> paths = new ArrayList<>();
++        ArrayList<Integer> extended_path = new ArrayList<>(path);
++        extended_path.add(0, to);
++        if (from == to) {  // base case
++            paths.add(extended_path);
++            return paths;
++        } else {
++            for (int mid = 0; mid < n_var; mid++) {
++                if (mid == to || path.contains(mid)) continue;
++                if (checkArcPossible(mid, to))
++                    paths.addAll(allPaths(from, mid, extended_path));
++            }
++        }
++        return paths;
++    }
++
++    // deprecated
++    private ArrayList<ArrayList<Integer>> allPaths(int from, int to) { return allPaths(from, to, new ArrayList<>()); }
++
++    private ArrayList<Integer> getGreedyPath(int from, int to, ArrayList<Integer> path) {
++        ArrayList<Integer> extended_path = new ArrayList<>(path), res_path;
++        extended_path.add(0, to);
++        if (from == to) {  // base case
++            return extended_path;
++        } else {
++            for (ParentSet pset: m_scores[to]) {
++                for (int mid: pset.parents) {
++                    if (mid == to || path.contains(mid)) continue;
++                    res_path = getGreedyPath(from, mid, extended_path);
++                    if (!res_path.isEmpty())
++                        return res_path;
++                }
++            }
++        }
++        return new ArrayList<>();
++    }
++
++    private ArrayList<Integer> getGreedyPath(int from, int to) { return getGreedyPath(from, to, new ArrayList<>()); }
++
++    // find path between two vertices that respects the elim order
++    // opt_depth = 0 -> return first path found
++    // opt_depth = 1 -> return best path after trying all parents of `to`
++    // opt_depth = 2 -> return best path after trying all 2 level high ancestors of `to`
++    // opt_depth = inf -> return best path
++    private ArrayList<Integer> getPath(int from, int to, int opt_depth, ArrayList<Integer> tail) {
++        ArrayList<Integer> extended_tail = new ArrayList<>(tail),
++                           final_path = new ArrayList<>(), candidate_path;
++        int shortest_path_length = Integer.MAX_VALUE;
++        extended_tail.add(0, to);
++        if (from == to) {  // base case
++            return extended_tail;
++        } else if (extended_tail.size() >= n_var/10) {  // eliminate long paths
++            return new ArrayList<>();  // return empty path
++        } else {
++            for (int mid: all_potential_parents.get(to)) {
++                if (tail.contains(mid)) continue;  // parent already "used up" in tail
++                if (index(mid, vars) > index(to, vars)) continue;  // resulting path will not respect elim ordering
++
++                candidate_path = getPath(from, mid, opt_depth-1, extended_tail);
++                if (candidate_path.isEmpty()) continue;
++
++                if (opt_depth <= 0) {
++                    final_path = candidate_path;
++                    break;
++                } else {
++                    if (candidate_path.size() < shortest_path_length) {
++                        final_path = candidate_path;
++                        shortest_path_length = candidate_path.size();
++                    }
++                }
++            }
++            return final_path;
++        }
++    }
++
++    private ArrayList<Integer> getPath(int from, int to, int depth) { return getPath(from, to, depth, new ArrayList<>()); }
++
++    protected void initializeAncestryPairs() {
++        // not javafx.util.Pair (but rather blip.core.utils.other.Pair)
++        for (Constraint con: constraints.all()) {
++            if (con.type == Constraint.Type.PositiveAncestry || con.type == Constraint.Type.UndirectedAncestry)
++                ancestry_pairs.add(new Pair<>(con.from, con.to));
++        }
++    }
++
++    public BrutalConstrainedOldSearcher(BaseSolver solver, int tw, ConstraintSet constraints,
++                                        boolean on_the_fly_descendants, boolean densify, int prepopulate) {
++        super(solver, tw);
++        this.constraints = constraints;  // todo: check if constraints agree with score function cache? (arc easy, anc?)
++
++        all_potential_parents = new HashMap<Integer, HashSet<Integer>>();
++        constraint_ancestors = new HashSet<Integer>();
++        descendants = new HashMap<Integer, HashSet<Integer>>();
++
++        // todo: consider positive and undirected ancestry constraints
++        ancestry_pairs = new ArrayList<>();
++        prepopulated_parents = new HashMap<>();
++
++        this.on_the_fly_descendants = on_the_fly_descendants;
++        this.densify = densify;
++        this.prepopulate = prepopulate;
++    }
++
++    @Override
++    public void init(ParentSet[][] scores, int thread) {
++        super.init(scores, thread);
++
++        initializePotentialParents();
++
++        boolean compatible = checkConstraintsPossible();
++        System.out.println("[constrained] compatible: " + compatible);
++        if (!compatible)
++            throw new RuntimeException("requested constraints not compatible with score function cache");
++
++        // descendant/constraint_ancestor initialization if not on the fly
++        if (!on_the_fly_descendants) initializeDescendants();
++
++        // prepopulated ancestry path initialization
++        if (prepopulate > 0) {
++            for (int v = 0; v < n_var; v++) prepopulated_parents.put(v, new HashSet<>());
++            initializeAncestryPairs();
++        }
++    }
++
++    @Override
++    // for every update to BN (i.e. new (v, pset) tuple), update descendants
++    protected void update(int v, ParentSet ps) {
++        super.update(v, ps);
++        if (on_the_fly_descendants) return;  // skip descendant updating
++        HashSet<Integer> ancestors = new HashSet<Integer>();
++        for (int p: ps.parents) {
++            ancestors.add(p);
++            // for some reason, BayesianNetwork.getDescendants returns parents and ancestors
++            for (int ancestor: new_bn.getDescendents(p).toArray())
++                ancestors.add(ancestor);
++        }
++
++        ancestors = intersection(constraint_ancestors, ancestors);
++        for (int ancestor: ancestors)
++            descendants.get(ancestor).add(v);
++    }
++
++    private HashSet<Integer> getDescendants(int from) {
++        if (!on_the_fly_descendants)
++            return descendants.get(from);
++
++        return toHashSet(new_bn.getAncestors(from));
++    }
++
++    private boolean var_visited(int v) {
++        return this.new_str[v] != null;
++    }
++
++    @Override
++    protected Pair<ParentSet, SIntSet> bestHandler(int v) {
++        // default empty pset result (not a valid pset, because score unknown)
++        Pair<ParentSet, SIntSet> result = new Pair<ParentSet, SIntSet>(new ParentSet(), new SIntSet());
++
++        boolean constraint_violated = false;
++        int num_constraints_violated = 0, min_constraints_violated = Integer.MAX_VALUE;
++
++        for (ParentSet p : m_scores[v]) {
++            num_constraints_violated = 0;
++
++            for (Constraint con: constraints.allTo(v)) {
++                constraint_violated = con.violated(v, p.parents, this::var_visited, this::getDescendants);
++                if (constraint_violated)
++                    if (!densify) break;  // no need to check other constraints
++                    else {
++                        num_constraints_violated++;
++                        if (num_constraints_violated > min_constraints_violated)
++                            break;
++                    }
++            }
++
++            if (prepopulate > 0) {
++                HashSet<Integer> prepop_parents = prepopulated_parents.get(v);
++                if (!prepop_parents.isEmpty()) {
++                    int common_parents = intersection(prepop_parents, p.parents);
++                    if (common_parents < prepop_parents.size()) continue;
++                }
++            }
++
++            if (!densify && constraint_violated) continue;
++
++
++            // only satisfying psets (and empty pset) can reach here
++            boolean found_satisfying_handle = false;
++            for (SIntSet h : handles) {
++                if (containsAll(p.parents, h.set)) {
++                    result = new Pair<ParentSet, SIntSet>(p, h);
++                    found_satisfying_handle = true;
++                    break;
++                }
++            }
++
++            if (found_satisfying_handle)
++                if (!densify)
++                    break;
++                else {
++                    if (num_constraints_violated == 0)
++                        break;  // cant get any better
++                    else
++                        min_constraints_violated = num_constraints_violated;
++                }
++        }
++
++        if (result.getSecond().set.length == 0)  // empty handle (no pset found) return empty pset with random handle
++            result = new Pair<ParentSet, SIntSet>(m_scores[v][m_scores[v].length - 1], handles.first());
++
++        return result;
++    }
++
++    private boolean currentStructureValid() {
++        // check here if init clique violates any negative constraints,
++        // move on to next elim order if violated
++        for (int v: vars) {
++            if (!var_visited(v)) continue;
++            for (Constraint con: constraints.allTo(v)) {
++                if (con.type == Constraint.Type.NegativeAncestry || 
++                    con.type == Constraint.Type.NegativeArc) {
++                    boolean violated = con.violated(v, new_str[v].parents, this::var_visited, this::getDescendants);
++                    if (violated) {
++                        System.out.println("#### negative constraint violated by init clique");
++                        System.out.println("constraint:" + con.from + "(" + con.type + ")" + con.to);
++                        for (int u: initCl) {
++                            System.out.println(u + "<-" + new_str[u]);
++                        }
++                    }
++                    if (violated) return false;
++                }
++            }
++        }
++        return true;
++    }
++
++    // Greedily optimize a network! 
++    // (identical to BrutalOldSearcher.search except for the initCl negative constraint satisfaction check)
++    @Override
++    public ParentSet[] search() {
++
++        vars = smp.sample();
++
++        // clear all
++        clear();
++
++        // Init the first maximal clique
++        initClique();
++        // quit this elim order if init clique not valid
++        if (!currentStructureValid()) return null;
++
++        Pair<ParentSet, SIntSet> res;
++
++        // For every new variable, add a new maximal clique
++        for (int i = tw + 1; i < n_var; i++) {
++            int v = vars[i];
++
++            // Search the best parent set given the handlers
++            // (best parent set inside available quasi-maximal cliques)
++            res = bestHandler(v);
++            // update the chosen parent set
++            update(v, res.getFirst());
++            // add the new handlers
++            // add new handler = new clique with size tw
++            // created  just now
++            SIntSet h = res.getSecond();
++
++            for (int elim : h.set) {
++                addHandler(new SIntSet(reduceAndIncreaseArray(h.set, v, elim)));
++            }
++
++            solver.checkTime();
++            if (!solver.still_time) {
++                return null;
++            }
++
++        }
++
++        if (!currentStructureValid()) {
++            System.out.println("#### negative constraint violated by new str");
++        }
++
++        return new_str;
++    }
++
++    protected void prepopulateAncestryPaths() {
++        int opt_depth = prepopulate - 1;  // prepop 0 -> no prepop, prepop 1 -> depth 0 i.e. fast
++        int found = 0;
++        for (Pair<Integer, Integer> pair: ancestry_pairs) {
++            int from = pair.getFirst(), to = pair.getSecond();
++            if (index(from, vars) > index(to, vars)) {
++                // can only happen for undirected ancestry pair
++                // PosetSampler ensures that positive ancestry pairs
++                // will always have correct orientation
++                int tmp = from;
++                from = to;
++                to = tmp;
++            }
++            ArrayList<Integer> path = getPath(from, to, opt_depth);
++            if (path.isEmpty()) continue;  // no path found, skip this ancestry pair
++            found++;
++            for (int idx=1; idx < path.size(); idx++) {
++                int u = path.get(idx-1), v = path.get(idx);
++                prepopulated_parents.get(v).add(u);
++            }
++        }
++    }
++
++    @Override
++    protected void clear() {
++        // check how many of previous prepops were respected
++        // todo: complete
++        if (prepopulate > 0) {
++            int respect_count = 0;
++            for (Pair<Integer, Integer> pair : ancestry_pairs) {
++                int from = pair.getFirst(), to = pair.getSecond();
++            }
++        }
++
++        super.clear();
++
++        if (!on_the_fly_descendants) {
++            // re-initialize descendants from old structure
++            for (int ancestor : constraint_ancestors) {
++                descendants.get(ancestor).clear();
++//                descendants.get(ancestor).add(ancestor);
++            }
++        }
++
++        if (prepopulate > 0)  // prepopulate network with greedily satisfied ancestry paths (respecting elim order)
++            prepopulateAncestryPaths();
++    }
++
++    public int countSatisfied() {
++        for (int v = 0; v < n_var; v++) assert var_visited(v);
++        return this.constraints.countSatisfied(this.new_bn);
++    }
++
++    // todo: handle exploreAll()
++}
+diff --git a/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalMaxDirectedSearcher.java b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalMaxDirectedSearcher.java
+index fd885b5..e45ba55 100644
+--- a/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalMaxDirectedSearcher.java
++++ b/core/src/main/java/ch/idsia/blip/core/learn/solver/src/brutal/BrutalMaxDirectedSearcher.java
+@@ -88,6 +88,7 @@ public class BrutalMaxDirectedSearcher extends BrutalOldSearcher {
+         chooseClique();
+ 
+         // p(Arrays.toString(vars));
++        vars = cloneArray(initCl);
+ 
+         // Prepare structures for best handlers selection
+         initCand();
+@@ -111,6 +112,7 @@ public class BrutalMaxDirectedSearcher extends BrutalOldSearcher {
+ 
+             // pf("Chosen %d \n", res.v);
+             finalize(res);
++            vars = addArray(vars, res.v);
+ 
+             solver.checkTime();
+             if (!solver.still_time) {
+diff --git a/core/src/main/java/ch/idsia/blip/core/utils/data/ArrayUtils.java b/core/src/main/java/ch/idsia/blip/core/utils/data/ArrayUtils.java
+index 1b5757f..c7278e4 100644
+--- a/core/src/main/java/ch/idsia/blip/core/utils/data/ArrayUtils.java
++++ b/core/src/main/java/ch/idsia/blip/core/utils/data/ArrayUtils.java
+@@ -4,10 +4,7 @@ package ch.idsia.blip.core.utils.data;
+ import ch.idsia.blip.core.utils.data.array.TIntArrayList;
+ import ch.idsia.blip.core.utils.data.set.TIntHashSet;
+ 
+-import java.util.ArrayList;
+-import java.util.Arrays;
+-import java.util.List;
+-import java.util.Random;
++import java.util.*;
+ 
+ 
+ public class ArrayUtils {
+@@ -620,4 +617,32 @@ public class ArrayUtils {
+         }
+         return -1;
+     }
++
++    public static boolean isDisjoint(HashSet<Integer> set1, int[] arr2) {
++        for (int e: arr2)
++            if (set1.contains(e))
++                return false;
++        return true;
++    }
++
++    public static HashSet<Integer> intersection(HashSet<Integer> set1, HashSet<Integer> set2) {
++        HashSet<Integer> result = new HashSet<Integer>(set1);
++        result.retainAll(set2);
++        return result;
++    }
++
++    public static int intersection(HashSet<Integer> set1, int[] arr2) {
++        int common = 0;
++        for (int e: arr2)
++            if (set1.contains(e)) common++;
++        return common;
++    }
++
++    // convert tinthashset to hashset<int>
++    public static HashSet<Integer> toHashSet(TIntHashSet ths) {
++        HashSet<Integer> result = new HashSet<Integer>();
++        for (int descendant: ths.toArray())
++            result.add(descendant);
++        return result;
++    }
+ }
+diff --git a/core/src/main/java/ch/idsia/blip/core/utils/other/ConstraintUtils.java b/core/src/main/java/ch/idsia/blip/core/utils/other/ConstraintUtils.java
+new file mode 100644
+index 0000000..bd96b13
+--- /dev/null
++++ b/core/src/main/java/ch/idsia/blip/core/utils/other/ConstraintUtils.java
+@@ -0,0 +1,82 @@
++package ch.idsia.blip.core.utils.other;
++
++
++import static ch.idsia.blip.core.utils.other.RandomStuff.logExp;
++
++import ch.idsia.blip.core.common.Constraint;
++import ch.idsia.blip.core.common.ConstraintSet;
++
++import java.io.*;
++import java.util.logging.Logger;
++
++
++public class ConstraintUtils {
++
++    private static final Logger log = Logger.getLogger(
++            ConstraintUtils.class.getName());
++
++    public static Constraint getConstraint(String line) {
++        Constraint.Type type;
++        int from, to;
++
++        String[] fragments = line.split("\\s+");
++
++        from = Integer.parseInt(fragments[1]);
++        to = Integer.parseInt(fragments[2]);
++        String typeStr = fragments[0];
++
++        if ("posanc".equals(typeStr))
++            type = Constraint.Type.PositiveAncestry;
++        else if ("neganc".equals(typeStr))
++            type = Constraint.Type.NegativeAncestry;
++        else if ("undanc".equals(typeStr))
++            type = Constraint.Type.UndirectedAncestry;
++        else if ("posarc".equals(typeStr))
++            type = Constraint.Type.PositiveArc;
++        else if ("negarc".equals(typeStr))
++            type = Constraint.Type.NegativeArc;
++        else if ("undarc".equals(typeStr))
++            type = Constraint.Type.UndirectedArc;
++        else
++            type = Constraint.Type.PositiveArc;
++
++        return new Constraint(type, from, to);
++    }
++
++
++    /**
++     * Get a ConstraintSet from the argument file
++     *
++     * @param path path to the file
++     * @param n_var number of variables in the network
++     * @return data file reader
++     * @throws IncorrectCallException        file path not valid
++     * @throws java.io.FileNotFoundException data file not found
++     * @throws IOException                   IO error while reading file
++     */
++    public static ConstraintSet getConstraintSet(String path, int n_var) {
++        ConstraintSet constraints = new ConstraintSet(n_var);
++
++        try {
++            if (path == null)
++                throw new IncorrectCallException("No data point path provided: " + path);
++
++            File confile = new File(path);
++            if (!confile.isFile())
++                throw new IncorrectCallException("No valid data point path provided: " + path);
++
++            BufferedReader reader = new BufferedReader(new FileReader(path));
++
++            String line;
++            while ((line = reader.readLine()) != null)
++                constraints.add(getConstraint(line));
++
++            return constraints;
++
++        } catch (Exception ex) {
++            logExp(log, ex);
++        }
++        return null;
++    }
++
++}

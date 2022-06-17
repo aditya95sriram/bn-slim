@@ -1,24 +1,26 @@
-# Turbocharging Treewidth-Bounded Bayesian Network Structure Learning
+# Bayesian Network - SAT-based Local Improvement Method
 
 
 [![DOI](https://zenodo.org/badge/336274070.svg)](https://zenodo.org/badge/latestdoi/336274070)
 
 
-> Instructions provided below have been tested on linux
-> (last updated: 26th October 2021)
+_These instructions have been tested on linux
+ (last updated: 17th June 2022)_
 
+> Originally accepted at AAAI-21. The tags [cwidth] and [expert] refer to the 
+> two follow-up versions accepted at NeurIPS-21 and UAI-22 resp.
 
 ## Required programming languages and software
 
 * `Java SDK` (required to run BLIP)
     - `Maven` (required to build BLIP)
 * `Python 3.6` or higher (required to run BN-SLIM)
-* `C++` (required to run Merlin)
-    - `Make` (required to build Merlin and UWrMaxSat)
+* `C++` (required to run Merlin) [cwidth]
+* `Make` (required to build Merlin and UWrMaxSat)
 * `git` (required to obtain ETL source code)
 * `Python 2.7` (required to run ETL)
 
-> Before you start, move all python (.py) files into the `slim` directory:
+> **Note:** Before you start, move all python (.py) files into the `slim` directory:
   (See Section: Directory Structure)
 
 
@@ -74,35 +76,48 @@
     unzip blip-publish.zip
     ```
 
-2. Apply patch `blip.patch` to enable elim-order output
+2. Apply patch `blip.patch`
 
     ```sh
     pushd blip-publish
     patch -ub -p1 -i ../blip.patch
     ```
 
-3. Compile BLIP
+3. Compile BLIP [cwidth] and move jar to `solvers/blip.jar`
 
     ```sh
     ./compile-blip.sh
-    popd
+    cp blip.jar ../blip.jar -v
     ```
 
-4. Place jar file in `solvers` directory
+5. Undo patch `blip.patch` and apply `blip-con.patch`
 
     ```sh
-    cp blip-publish/blip.jar . -v
+    patch -u -p1 -i ../blip.patch --reverse
+    patch -ub -p1 -i ../blip-con.patch
+    ```
+
+6. Compile BLIP [expert] and move jar to `solvers/blip-con.jar`
+
+    ```sh
+    ./compile-blip.sh
+    cp blip.jar ../blip-con.jar -v
+    popd
     popd
     ```
 
-5. (Optional) Test and check if `tmp.res` contains `elim-order` field after running
+7. (Optional) Tests
+
+    a. [cwidth] check if `java -jar solvers/blip.jar solver.kg.adv` contains `-cw`
+    b. [expert] check if `java -jar solvers/blip.jar solver.kg.adv` contains `-con`
+    c. Check if `tmp.res` contains `elim-order` field after running
 
     ```sh
     java -jar solvers/blip.jar solver.kmax -j test.jkl -r tmp.res -w 5 -v 1
     ```
 
 
-### Merlin (`setup-merlin.sh`)
+### Merlin (`setup-merlin.sh`) [cwidth]
 
 1. Download and unzip source from [Merlin][8]
 
@@ -170,9 +185,8 @@
 
 ## Datasets and Experiment Data
 
-The datasets are available in the `datasets` folder, which contains two
-subfolders: the `dat` folder with `.dat` files and the `jkl` folder with
-the `.jkl` files (see Section on File formats for more details).
+The datasets are available in the `datasets` folder, which contains subfolders
+`dat`, `jkl` and `con` (see Section on File formats for more details).
 
 The Experimental results are contained in the `experiments` folder.
 The raw data from the experiments are provided as `.csv` files
