@@ -4,8 +4,7 @@
 [![DOI](https://zenodo.org/badge/336274070.svg)](https://zenodo.org/badge/latestdoi/336274070)
 
 
-_These instructions have been tested on linux
- (last updated: 17th June 2022)_
+_These instructions have been tested on linux (last updated: 17th June 2022)_
 
 > Originally accepted at AAAI-21. The tags [cwidth] and [expert] refer to the 
 > two follow-up versions accepted at NeurIPS-21 and UAI-22 resp.
@@ -108,9 +107,9 @@ _These instructions have been tested on linux
 
 7. (Optional) Tests
 
-    a. [cwidth] check if `java -jar solvers/blip.jar solver.kg.adv` contains `-cw`
-    b. [expert] check if `java -jar solvers/blip.jar solver.kg.adv` contains `-con`
-    c. Check if `tmp.res` contains `elim-order` field after running
+    - [cwidth] check if `java -jar solvers/blip.jar solver.kg.adv` contains `-cw`
+    - [expert] check if `java -jar solvers/blip.jar solver.kg.adv` contains `-con`
+    - Check if `tmp.res` contains `elim-order` field after running
 
     ```sh
     java -jar solvers/blip.jar solver.kmax -j test/test.jkl -r tmp.res -w 5 -v 1
@@ -271,8 +270,13 @@ bnslim
 cd slim
 # bounded treewidth
 python slim.py ../test/test.jkl 5 -v -u kmax -t 60
-# bounded msss
+# bounded msss [cwidth]
 python slim.py ../test/test.jkl 0 -v -u kmax -t 60 -b 0 -d ../test/test.dat --start-with ../test/demo.res -w --feasible-cw --feasible-cw-threshold 108
+# constraints + bounded treewidth [expert]
+#   - first generate starting network through blip-con.jar
+java -jar ../solvers/blip-con.jar solver.kg.adv -v 1 -con ../test/test.con -j ../test/test.jkl -w 5 -r ../test/demo2.res -t 60 -seed 1
+#   - then run slim on it
+python slim.py ../test/test.jkl 5 -v -u kg.adv -t 60 -b 10 -s 5 --constraint-file ../test/test.con --start-with ../test/demo2.res -r 1
 ```
 
 > Run `python slim.py --help` for description of available options
@@ -357,6 +361,14 @@ The supported constraint types are: positive/negative/undirected arc
 
 ### AAAI 2020 paper (∆BIC analysis)
 
+> **Turbocharging Treewidth-Bounded Bayesian Network Structure Learning** <br/>
+> Vaidyanathan Peruvemba Ramaswamy, Stefan Szeider <br/>
+> _Proceeding of AAAI-21, the Thirty-Fifth AAAI Conference on Artificial Intelligence, pages 3895–3903, 2021, AAAI Press.)_ <br/>
+> [[bibtex]](https://www.ac.tuwien.ac.at/publications/VaidyanathanSzeider21?file=../../publications/publications-web.bib)
+> [[url]](https://ojs.aaai.org/index.php/AAAI/article/view/16508)
+> [[pdf]](https://ojs.aaai.org/index.php/AAAI/article/view/16508/16315)
+
+
 #### BN-SLIM(ETLd) vs ETLd
 
 | ∆BIC               | tw 2 | tw 5 | tw 8 |
@@ -398,7 +410,16 @@ and supplied using the `--start-with` option.
 
 If that doesn't work, try running with a `aaai` tagged commit.
 
+
 ### NeurIPS 2021 paper
+
+> **Learning fast-inference Bayesian networks** <br/>
+> Vaidyanathan Peruvemba Ramaswamy, Stefan Szeider <br/>
+> _Proceedings of NeurIPS 2021, the Thirty-fifth Conference on Neural Information Processing Systems (M. Ranzato, A. Beygelzimer, K. Nguyen, P.S. Liang, J.W. Vaughan, Y. Dauphin, eds.), pages 17852–17863, 2021._ <br/>
+> [[bibtex]](https://www.ac.tuwien.ac.at/publications/VaidyanathanSzeider21b?file=../../publications/publications-web.bib)
+> [[url]](https://proceedings.neurips.cc/paper/2021/hash/94e70705efae423efda1088614128d0b-Abstract.html)
+> [[pdf]](https://proceedings.neurips.cc/paper/2021/file/94e70705efae423efda1088614128d0b-Paper.pdf)
+
 
 `experiments/baseline_data.csv` and `experiments/heuristic_data.csv`
 contain all the data for the 16 datasets from `datasets.zip`, 
@@ -412,6 +433,16 @@ python -O slim.py <dataset> <treewidth> -t5400 -u <heuristic> -d <datfile.dat> -
 Where `heur_sol.res` is the initial heuristic solution which was computed before-hand
 and supplied using the `--start-with` option, and `datfile.dat` is the datfile corresponding
 to the supplied dataset.
+
+
+### UAI 2022 paper
+
+> **Learning Large Bayesian Networks with Expert Constraints** <br/>
+> Vaidyanathan Peruvemba Ramaswamy, Stefan Szeider <br/>
+> 38th Conference on Uncertainty in Artificial Intelligence (UAI 2022), Endhoven, Netherlands, August 1–5, 2022 (James Cussens, Kun Zhang, eds.), 2022. <br/>
+> [[bibtex]](https://www.ac.tuwien.ac.at/publications/VaidyanathanSzeider22?file=../../publications/publications-web.bib)
+> [[url]](https://openreview.net/forum?id=HhMg3wUsclc)
+> [[pdf]](https://openreview.net/pdf?id=HhMg3wUsclc)
 
 
 
