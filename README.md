@@ -62,7 +62,7 @@ _These instructions have been tested on linux
 5. (Optional) Test
 
     ```sh
-    solvers/uwrmaxsat -m test.cnf -v1 -cpu-lim=2
+    solvers/uwrmaxsat -m test/test.cnf -v1 -cpu-lim=2
     ```
 
 
@@ -113,7 +113,7 @@ _These instructions have been tested on linux
     c. Check if `tmp.res` contains `elim-order` field after running
 
     ```sh
-    java -jar solvers/blip.jar solver.kmax -j test.jkl -r tmp.res -w 5 -v 1
+    java -jar solvers/blip.jar solver.kmax -j test/test.jkl -r tmp.res -w 5 -v 1
     ```
 
 
@@ -151,7 +151,7 @@ _These instructions have been tested on linux
 5. (Optional) Test and check if `tmp.PR.json` contains `value` of `-7.730569` after running
 
     ```sh
-    solvers/merlin -t PR -a wmb -M lex -o tmp -O json -i 4 -f test.uai -e test.evid
+    solvers/merlin -t PR -a wmb -M lex -o tmp -O json -i 4 -f test/test.uai -e test/test.evid
     ```
 
 
@@ -179,7 +179,7 @@ _These instructions have been tested on linux
 
     ```sh
     cd solvers/et_learn
-    python hcet.py ../../test.data 5 -p -o tmp
+    python hcet.py ../../test/test.data 5 -p -o tmp
     ```
 
 
@@ -221,14 +221,15 @@ bnslim
 ├── setup-blip.sh
 ├── setup-merlin.sh
 ├── download-etlearn.sh
-├── test.cnf
-├── test.jkl
-├── test.dat
-├── test.uai
-├── test.evid
-├── test.data
-├── demo.res
-├── demo.net
+├── test
+│   ├── test.cnf
+│   ├── test.jkl
+│   ├── test.dat
+│   ├── test.uai
+│   ├── test.evid
+│   ├── test.data
+│   ├── demo.res
+|   └── demo.net
 ├── requirements.txt
 ├── optional_requirements.txt
 ├── solvers
@@ -269,9 +270,9 @@ bnslim
 ```sh
 cd slim
 # bounded treewidth
-python slim.py ../test.jkl 5 -v -u kmax -t 60
+python slim.py ../test/test.jkl 5 -v -u kmax -t 60
 # bounded msss
-python slim.py ../test.jkl 0 -v -u kmax -t 60 -b 0 -d ../test.dat --start-with ../demo.res -w --feasible-cw --feasible-cw-threshold 108
+python slim.py ../test/test.jkl 0 -v -u kmax -t 60 -b 0 -d ../test/test.dat --start-with ../test/demo.res -w --feasible-cw --feasible-cw-threshold 108
 ```
 
 > Run `python slim.py --help` for description of available options
@@ -290,7 +291,7 @@ description of some of these file formats.
 A `.res` file contains the DAG expressed by means of the parent sets
 as well as a field indicating the score of the DAG and optionally
 the elimination ordering used to bound the treewidth of the DAG. 
-> See `demo.res` for an example.
+> See `test/demo.res` for an example.
 
 The patch applied to BLIP allows it to output `.res` files with the 
 elimination ordering which isn't supported by it out-of-the-box.
