@@ -249,18 +249,20 @@ bnslim
 |   ├── jkl/
 |   └── con/
 ├── experiments*
-|   ├── baseline_data.csv
-|   ├── heuristic_data.csv
-│   └── plots/
+|   ├── cwidth/
+|   └── expert/
 └── slim
     ├── blip.py
     ├── bnio.py
+    ├── constrained_encoding.py
     ├── complexity_encoding.py
     ├── berg_encoding.py
     ├── eval_model.py
+    ├── generate_constraints.py
     ├── samer_veith.py
     ├── slim.py
     ├── utils.py
+    ├── hcet.py
     └── verify_cwidth.py
 ```
 
@@ -444,6 +446,22 @@ to the supplied dataset.
 > [[bibtex]](https://www.ac.tuwien.ac.at/publications/VaidyanathanSzeider22?file=../../publications/publications-web.bib)
 > [[url]](https://openreview.net/forum?id=HhMg3wUsclc)
 > [[pdf]](https://openreview.net/pdf?id=HhMg3wUsclc)
+
+#### Con-BN-SLIM vs Con-k-greedy
+
+| ∆BIC               | count|
+|--------------------|-----:|
+| extremely positive | 127  |
+| strongly positive  | 0    |
+| positive           | 0    |
+| neutral            | 14   |
+| negative           | 1    |
+| strongly negative  | 0    |
+| extremely negative | 7    |
+
+The data from the experimental evaluation for the paper are available as 
+`<method>_data.csv` files for the scores and `<method>_activity.csv` files
+for the improvement activity within the `experiments/expert` folder.
 
 
 
